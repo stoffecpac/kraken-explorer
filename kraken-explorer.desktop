@@ -7,5 +7,5 @@ Exec=/usr/bin/kraken-explorer %f
 Comment=Deeper than a Peak. Wireshark is stuck in shallow waters.
 Icon=kraken-explorer
 StartupNotify=false
-Categories=Development
+Categories=Development;
 

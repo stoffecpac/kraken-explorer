@@ -12,7 +12,12 @@ Fork of [CANgaroo](https://github.com/Schildkroet/CANgaroo).
 and statistics on five simulated buses.
 
 ```bash
-cmake -S . -B build -G Ninja && cmake --build build   # binary: build/src/kraken-explorer
+cmake -S . -B build -G Ninja && cmake --build build --target kraken-explorer
+# binary: build/src/kraken-explorer
+
+# optional: app menu entry for the current user
+sed "s|^Exec=.*|Exec=$PWD/build/src/kraken-explorer %f|" kraken-explorer.desktop > ~/.local/share/applications/kraken-explorer.desktop
+install -D packaging/kraken-explorer.png ~/.local/share/icons/hicolor/256x256/apps/kraken-explorer.png
 ```
 
 Interfaces, features, dependencies and permissions: see [docs/manual.md](docs/manual.md).
