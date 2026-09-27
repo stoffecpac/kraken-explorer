@@ -1,0 +1,44 @@
+FormatVersion=6.0 // Do not edit this line!
+Title="Kraken test"
+
+{ENUMS}
+Enum=Gear(0="Park", 1="Reverse",
+  2="Neutral", 3="Drive")
+
+{SIGNALS}
+Sig=Temp signed 8 /u:C /o:-40
+
+{SEND}
+[Engine]
+ID=123h // engine status
+Len=8
+CycleTime=100
+Var=Speed unsigned 0,16 /u:"km/h" /f:0.01 /max:655.35
+Var=Rpm unsigned 16,16 -m /f:0.25
+Var=Torque signed 32,12 /f:0.5 /o:-100
+Var=Gear unsigned 44,4 /e:Gear
+Sig=Temp 56
+
+{RECEIVE}
+[Muxed]
+ID=18FF0010h
+Type=Extended
+Len=8
+Mux=Page 0,8 1
+Var=A unsigned 8,16
+
+[Muxed]
+Len=8
+Mux=Page 0,8 2
+Var=B signed 8,8 -m /f:2
+
+[Floats]
+ID=200h
+Len=8
+Var=F float 0,32
+Var=G float 32,32 -m /f:0.5 /o:10
+
+[Dbl]
+ID=201h
+Len=8
+Var=D double 0,64

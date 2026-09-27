@@ -1,0 +1,178 @@
+#pragma once
+
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <set>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "core/bus_message.h"
+#include "decoders/decoders.h"
+#include "ui/vim_nav.h"
+
+// No <imgui.h> here: app.h includes this header and is included by targets without imgui.
+
+struct App;
+struct CanDbSignal;
+struct WorkspaceTab;
+
+// Values match the old timestamp_mode_t, so workspace files keep their meaning.
+enum class TimestampMode
+{
+    Absolute = 0,
+    Relative = 1, // since the first frame the window saw after a clear
+    Delta = 2,    // since the previous frame with the same id/interface/direction
+    AbsoluteUtc = 3,
+};
+
+enum class TraceViewMode
+{
+    Aggregated,
+    Rolling,
+};
+
+enum class TraceTab
+{
+    Monitor,
+    Uds,
+    J1939,
+    Count,
+};
+
+// The Filter dialog plus the text filter (case-insensitive substring of ID, name, channel,
+// sender and type).
+struct TraceFilter
+{
+    std::string text;
+    bool show_tx = true;
+    bool show_rx = true;
+    std::set<uint32_t> hidden_ids;     // CAN id (can_id())
+    std::set<uint32_t> hidden_lin_ids; // LIN frame id
+    std::set<uint16_t> hidden_ifaces;
+};
+
+// Monitor, rolling log: one frame that passed the filter.
+struct TraceRow
+{
+    uint64_t index = 0; // trace index
+    uint64_t prev = UINT64_MAX; // trace index of the previous frame with the same delta key
+};
+
+// Cycle time statistics of one aggregated row: min/max/mean over every cycle, median over
+// the newest cycles only.
+struct CycleStats
+{
+    // ponytail: median over the last 256 cycles (2 KiB per id), a streaming quantile sketch if
+    // the whole history is ever needed.
+    static constexpr std::size_t window = 256;
+    std::array<int64_t, window> recent{}; // ring buffer of cycle times in ns
+    int64_t min_ns = INT64_MAX;
+    int64_t max_ns = 0;
+    int64_t sum_ns = 0;
+    uint64_t count = 0;
+};
+
+void cycle_stats_add(CycleStats& c, int64_t cycle_ns) noexcept;
+// Median of the recent window in ns (mean of the two middle values for an even count); 0 if empty.
+[[nodiscard]] double cycle_stats_median(const CycleStats& c);
+
+// Monitor, aggregated: the newest frame per (direction, error, interface, bus, id).
+struct AggRow
+{
+    BusMessage last{};
+    BusMessage prev{}; // previous frame of this row; len == 0 before the second one
+    uint32_t order = 0; // 1-based order of appearance (Index column)
+    bool has_prev = false;
+    CycleStats cycle;
+};
+
+struct ProtoRow
+{
+    ProtocolMessage msg;
+    int64_t prev_ts_ns = 0; // previous message from the same raw frame key (Delta column)
+    uint32_t order = 0;
+};
+
+// One protocol tab (UDS or J1939): both the rolling list and the aggregated rows.
+struct ProtoView
+{
+    std::vector<ProtoRow> rolling;
+    std::vector<uint32_t> visible; // indices into rolling that pass the filter
+    std::vector<ProtoRow> aggregated;
+    std::unordered_map<uint64_t, uint32_t> agg_index; // key -> index into aggregated
+    std::unordered_map<uint64_t, int64_t> last_ts;    // delta key -> last timestamp
+    uint32_t next_order = 1;
+};
+
+struct TraceWindowState
+{
+    TraceTab tab = TraceTab::Monitor;
+    TraceViewMode modes[static_cast<int>(TraceTab::Count)] = {TraceViewMode::Aggregated, TraceViewMode::Rolling,
+                                                              TraceViewMode::Aggregated};
+    TimestampMode ts_mode = TimestampMode::Delta;
+    bool autoscroll = true;
+    bool ascii = false; // data column as ASCII instead of hex (tracewindow/dataAsciiMode)
+    bool decimal = false; // Data and ID columns in decimal instead of hex
+    TraceFilter filter;
+
+    // Everything below is derived from the trace by trace_window_update().
+    std::string filter_edit; // text box contents, applied to filter.text after a short pause
+    std::chrono::steady_clock::time_point filter_edited{};
+    bool filter_dirty = true; // rebuild the filtered lists on the next update
+    uint64_t processed = 0;   // next trace index to look at
+    uint64_t refilter = UINT64_MAX; // next index of a running rolling-log refilter, UINT64_MAX = none
+    uint64_t index_base = 0;  // trace index shown as Index 1 (the trace begin at the last clear)
+    uint64_t clears = 0;      // Trace::clears last seen
+    int64_t first_ts_ns = 0;
+    std::vector<TraceRow> rolling;
+    std::unordered_map<uint64_t, uint64_t> last_by_key; // delta key -> trace index
+    std::vector<AggRow> agg;
+    std::unordered_map<uint64_t, uint32_t> agg_index; // aggregation key -> index into agg
+    std::vector<uint32_t> agg_order; // agg indices in display (sort) order
+    bool agg_dirty = true;           // row set or filter changed: rebuild agg_order on the next draw
+    uint64_t agg_setup_gen = 0;      // Setup::generation at the last rebuild (names, senders)
+    double agg_sorted_time = -1.0;   // ImGui::GetTime() of the last rebuild
+    uint64_t agg_sorts = 0;          // agg_order rebuilds (for tests)
+    ProtocolDecoder decoder;
+    ProtoView uds;
+    ProtoView j1939;
+    std::size_t max_proto_rows = 100000; // oldest 20% dropped beyond this
+    bool scroll_pending = false;
+
+    // Vim motions over the rows of the current table (position in display order, -1 = none).
+    VimNav vim;
+    int selected = -1;
+    bool nav_scroll = false;   // scroll to the selected row when it is drawn next
+    bool yank_pending = false; // 'y': copy the selected row's cells when it is drawn next
+    bool focus_filter = false; // '/' pressed: focus the Filter field next frame
+    int tab_goto = -1;         // h/l: TraceTab to switch to, -1 = none
+};
+
+// Pulls new frames from app.trace into the window's lists: incremental filter, aggregation
+// and protocol decoding. Applies a pending filter change or trace clear first. No ImGui.
+void trace_window_update(TraceWindowState& s, const App& app);
+
+// Filter predicate used for all lists (exposed for tests).
+[[nodiscard]] bool trace_filter_accepts(const TraceWindowState& s, const App& app, const BusMessage& m);
+
+// Interfaces the Filter popup lists: those in the measurement setup (driver + name) plus any
+// with frames in the trace. Returns Iface::index values.
+[[nodiscard]] std::vector<uint16_t> trace_filter_ifaces(const TraceWindowState& s, const App& app);
+
+// Changed-byte mask of cur against prev (bit i = byte i); 0 for error frames or no prev.
+[[nodiscard]] uint64_t trace_changed_mask(const BusMessage& cur, const BusMessage& prev) noexcept;
+
+// Draws the Trace window of a workspace tab (update included). When loading a filter,
+// set filter_edit = filter.text too (the text box edits filter_edit).
+// Data / ID column text: hex ("12 AB", "0x123") or decimal ("18 171", "291"); a CAN error frame
+// shows its error flags / "-" either way.
+void trace_append_data(std::string& out, const BusMessage& m, bool decimal);
+void trace_append_id(std::string& out, const BusMessage& m, bool decimal);
+// Value of an expanded signal row: "raw - value name", else the physical value (+ unit) with up
+// to 15 significant digits ("0.3", not "0.30000000000000004"); float32 signals at float precision.
+void trace_append_signal_value(std::string& out, const CanDbSignal& sig, uint64_t raw);
+
+void draw_trace_window(App& app, TraceWindowState& s, const WorkspaceTab& tab);

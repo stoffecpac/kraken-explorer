@@ -1,0 +1,205 @@
+name: Build Kraken Explorer
+
+on:
+  workflow_dispatch:  # enables manual trigger
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+env:
+  # System packages from README. The X11/Wayland ones are only needed by GLFW,
+  # so headless jobs configure with -DGLFW_BUILD_X11=OFF -DGLFW_BUILD_WAYLAND=OFF
+  # and install just BUILD_DEPS.
+  BUILD_DEPS: >-
+    build-essential cmake ninja-build pkg-config
+    libusb-1.0-0-dev libnl-3-dev libnl-route-3-dev python3-dev pybind11-dev libgl-dev
+  GUI_DEPS: >-
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+    libwayland-dev libxkbcommon-dev wayland-protocols
+  HEADLESS: -DGLFW_BUILD_X11=OFF -DGLFW_BUILD_WAYLAND=OFF
+
+jobs:
+  unit-tests:
+    name: Unit tests (doctest, ASan + UBSan)
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ env.BUILD_DEPS }} ${{ env.GUI_DEPS }}
+
+    # FetchContent downloads (imgui, glfw, ...). Only sources and download stamps
+    # are cached; *-build dirs are rebuilt with this run's flags.
+    - &fetch_cache
+      name: Cache FetchContent dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/_deps
+          !build/_deps/*-build
+        key: fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/deps.cmake') }}
+
+    # Tests that need vcan0/vcan1 skip themselves when these are missing, and the
+    # vcan module is not guaranteed to exist for the runner's kernel.
+    - name: Set up vcan0 / vcan1
+      continue-on-error: true
+      run: |
+        sudo modprobe vcan || {
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          sudo modprobe vcan
+        }
+        for i in 0 1; do
+          sudo ip link add dev vcan$i type vcan
+          sudo ip link set up vcan$i
+        done
+        ip -brief link show type vcan
+
+    - name: Configure
+      run: cmake -S . -B build -G Ninja -DCANGAROO_SANITIZE=ON
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests
+      run: ctest --test-dir build --output-on-failure
+
+  format-compat:
+    name: Trace format compatibility (python-can, scapy, asammdf)
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ env.BUILD_DEPS }} python3-venv
+
+    - *fetch_cache
+
+    - name: Install reference readers
+      run: |
+        python3 -m venv .venv
+        .venv/bin/pip install -r tests/format_compat/requirements.txt
+
+    - name: Build sample writer
+      run: |
+        cmake -S . -B build -G Ninja ${{ env.HEADLESS }}
+        cmake --build build --target trace_format_samples
+
+    - name: Write samples and read them back
+      run: |
+        # Every export format and split recorder output, checked by readers that
+        # share no code with cangaroo. See tests/format_compat/validate.py.
+        build/tests/format_compat/trace_format_samples build/format_compat
+        .venv/bin/python tests/format_compat/validate.py build/format_compat
+
+  package:
+    name: Build Kraken Explorer DEB + AppImage
+    runs-on: ubuntu-24.04
+
+    env:
+      # Kvaser linuxcan version — update here when a newer SDK is released.
+      KVASER_VERSION: "5.51.461"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ env.BUILD_DEPS }} ${{ env.GUI_DEPS }} wget fuse libfuse2
+
+    - *fetch_cache
+
+    - name: Install Kvaser CANlib (Linux)
+      run: |
+        VER_US="${KVASER_VERSION//./_}"
+        wget -q "https://pim.kvaser.com/var/assets/Product_Resources/7330130980754/${KVASER_VERSION}/linuxcan_${VER_US}.tar.gz" \
+          -O /tmp/linuxcan.tar.gz
+        mkdir -p /tmp/linuxcan
+        tar -xf /tmp/linuxcan.tar.gz -C /tmp/linuxcan --strip-components=1
+        # Build only the userspace canlib — no kernel modules required
+        make -C /tmp/linuxcan/canlib
+        sudo make -C /tmp/linuxcan/canlib install
+        sudo ldconfig
+
+    - name: Build DEB package
+      env:
+        CMAKE_ARGS: -DCANGAROO_KVASER=ON
+        DEB_MAINTAINER: Schildkroet <https://github.com/Schildkroet>
+      run: |
+        # libcanlib comes from the linuxcan build above; no Debian package provides it.
+        BUNDLE_LIBS="$(find /usr/lib /usr/local/lib -maxdepth 2 -name 'libcanlib*.so*' | tr '\n' ' ')" \
+          scripts/build_deb.sh build
+        dpkg-deb --info build/*.deb
+
+    - name: Read version
+      run: |
+        # project(kraken_explorer VERSION x.y.z ...) in the top-level CMakeLists.txt
+        PKG_VERSION=$(sed -nE 's/^project\(kraken_explorer VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+        test -n "$PKG_VERSION"
+        echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
+
+    - name: Prepare AppDir
+      run: |
+        install -Dm755 -s build/src/kraken-explorer AppDir/usr/bin/kraken-explorer
+        install -Dm644 packaging/kraken-explorer.png AppDir/usr/share/icons/hicolor/256x256/apps/kraken-explorer.png
+        mkdir -p AppDir/usr/share/applications
+        sed 's|Exec=/usr/bin/kraken-explorer %f|Exec=kraken-explorer %f|' kraken-explorer.desktop \
+          > AppDir/usr/share/applications/kraken-explorer.desktop
+
+    - name: Bundle Python runtime
+      run: |
+        # linuxdeploy bundles libpython, but its compiled-in prefix points at this
+        # runner. Ship the matching stdlib as usr/lib/pythonX.Y: python_engine sets
+        # PYTHONHOME to <prefix> when <prefix>/lib/pythonX.Y/os.py exists next to bin/.
+        PY_PREFIX=$(pkg-config --variable=prefix python3-embed)
+        PYVER=$(pkg-config --modversion python3-embed | cut -d. -f1,2)
+        echo "linked against Python ${PYVER} in ${PY_PREFIX}"
+
+        SRC="${PY_PREFIX}/lib/python${PYVER}"
+        test -f "${SRC}/os.py" || { echo "ERROR: stdlib not found at ${SRC}"; exit 1; }
+
+        DST="AppDir/usr/lib/python${PYVER}"
+        mkdir -p "${DST}"
+        cp -r "${SRC}"/. "${DST}"/
+        # Trim what the embedded interpreter never needs.
+        rm -rf "${DST}/test" "${DST}/idlelib" "${DST}/tkinter" "${DST}/turtledemo"
+        find "${DST}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+        find "${DST}" -type d -name tests -exec rm -rf {} + 2>/dev/null || true
+
+        # pybind11 needs the encodings codec at startup; lib-dynload carries the
+        # C extension modules (_socket, zlib, ...) and must come along.
+        test -f "${DST}/encodings/__init__.py"
+        ls "${DST}/lib-dynload" >/dev/null
+
+    - name: Build AppImage
+      env:
+        LINUXDEPLOY_OUTPUT_VERSION: ${{ env.PKG_VERSION }}
+      run: |
+        wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+        chmod +x linuxdeploy-x86_64.AppImage
+        # No Qt plugin any more: GLFW loads X11/Wayland/GL from the host at runtime,
+        # linuxdeploy bundles the rest (libpython, libnl, libusb, libcanlib).
+        ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
+        ls -la Kraken*.AppImage
+
+    - name: Upload DEB package
+      uses: actions/upload-artifact@v6
+      with:
+        name: KrakenExplorer-Linux-DEB
+        path: "build/*.deb"
+
+    - name: Upload AppImage
+      uses: actions/upload-artifact@v6
+      with:
+        name: KrakenExplorer-Linux-AppImage
+        path: "Kraken*.AppImage"

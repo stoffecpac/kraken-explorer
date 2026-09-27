@@ -1,0 +1,1586 @@
+#include "ui/graph.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <format>
+#include <fstream>
+#include <limits>
+#include <numbers>
+
+#include <imgui.h>
+#include <implot.h>
+#include <misc/cpp/imgui_stdlib.h>
+#include <pugixml.hpp>
+
+#include "app.h"
+#include "core/log.h"
+#include "db/model/can_db.h"
+#include "db/model/lin_db.h"
+#include "core/stats.h"
+#include "ui/icons.h"
+#include "ui/theme.h"
+
+namespace
+{
+
+constexpr const char* view_names[] = {"Time Series", "XY", "Text", "Gauge"};
+constexpr const char* view_keys[] = {"timeseries", "xy", "text", "gauge"};  // workspace XML, GraphView order
+constexpr const char* kind_keys[] = {"can", "lin", "busload"};             // GraphSignalKind order
+constexpr const char* duration_names[] = {"All", "1 min", "5 min", "10 min", "15 min", "30 min"};
+constexpr double duration_secs[] = {0.0, 60.0, 300.0, 600.0, 900.0, 1800.0};
+constexpr double bus_load_window_s = 1.0;  // rolling window, as the Qt decoder worker
+constexpr double bus_load_sample_s = 0.05;
+// ponytail: plain vectors capped by dropping the oldest half; a real ring buffer if the copy shows up.
+constexpr std::size_t max_points = std::size_t{2} << 20;
+constexpr const char* drag_payload = "GRAPH_SIGNAL";
+
+double wall_seconds()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void push_sample(GraphSignal& s, double t, double v)
+{
+    if (s.t.size() >= max_points)
+    {
+        s.t.erase(s.t.begin(), s.t.begin() + static_cast<std::ptrdiff_t>(max_points / 2));
+        s.v.erase(s.v.begin(), s.v.begin() + static_cast<std::ptrdiff_t>(max_points / 2));
+    }
+    s.seen_min = s.t.empty() ? v : std::min(s.seen_min, v);
+    s.seen_max = s.t.empty() ? v : std::max(s.seen_max, v);
+    s.t.push_back(t);
+    s.v.push_back(v);
+}
+
+// Ages the rolling window up to t and emits a sample every bus_load_sample_s.
+void sample_bus_load(GraphSignal& s, double t)
+{
+    while (!s.load_window.empty() && s.load_window.front().first < t - bus_load_window_s)
+    {
+        s.load_bits -= s.load_window.front().second;
+        s.load_window.pop_front();
+    }
+    if (s.bitrate == 0 || (s.load_emitted >= 0.0 && t - s.load_emitted < bus_load_sample_s))
+    {
+        return;
+    }
+    s.load_emitted = t;
+    const double load = static_cast<double>(s.load_bits) / (s.bitrate * bus_load_window_s) * 100.0;
+    push_sample(s, t, std::min(load, 100.0));
+}
+
+void clear_samples(GraphState& g)
+{
+    for (auto& s : g.signals)
+    {
+        s.t.clear();
+        s.v.clear();
+        s.load_window.clear();
+        s.load_bits = 0;
+        s.load_emitted = -1.0;
+    }
+    g.start_ns = -1;
+    g.last_t = 0.0;
+    g.follow = true;
+}
+
+// Newest time on the X axis: while measuring it keeps running between frames.
+double graph_now(const GraphState& g, bool measuring)
+{
+    return measuring && g.start_ns >= 0 ? g.last_t + (wall_seconds() - g.last_wall) : g.last_t;
+}
+
+// Cursor A: the theme's teal accent; B: its warning brass.
+ImVec4 cursor_color(int k)
+{
+    return k == 0 ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark) : ImGui::ColorConvertU32ToFloat4(theme_text(ThemeText::warn));
+}
+
+void update_cursor_values(GraphState& g)
+{
+    if (g.cursor_on)
+    {
+        for (auto& s : g.signals)
+        {
+            graph_cursor_values(s, g.cursor_a, g.cursor_b);
+        }
+    }
+}
+
+const std::vector<int>& graph_slots(GraphState& g)
+{
+    if (g.slots_dirty || g.slots.size() != g.signals.size())
+    {
+        g.slots = graph_assign_slots(g.signals);
+        g.slots_dirty = false;
+    }
+    return g.slots;
+}
+
+// Re-resolves CAN signal pointers after a setup change; signals whose database is gone go too.
+void resolve_signals(GraphState& g, const Setup& setup)
+{
+    g.slots_dirty = true;
+    std::erase_if(g.signals, [&](GraphSignal& s)
+    {
+        if (s.kind != GraphSignalKind::Can)
+        {
+            return false;
+        }
+        for (const auto& net : setup.networks)
+        {
+            if (net.name != s.network)
+            {
+                continue;
+            }
+            for (const auto& db : net.can_dbs)
+            {
+                if (CanDbMessage* msg = can_db_find_message(*db, s.can_raw_id))
+                {
+                    if (const CanDbSignal* sig = can_db_find_signal(*msg, s.name))
+                    {
+                        s.can_msg = msg;
+                        s.can_sig = sig;
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    });
+}
+
+uint32_t next_color(const GraphState& g)
+{
+    return ImGui::ColorConvertFloat4ToU32(ImPlot::GetColormapColor(static_cast<int>(g.signals.size())));
+}
+
+// Checkbox that adds/removes one signal of the tree; `match` finds it in g.signals.
+template <class Match, class Make>
+void signal_checkbox(GraphState& g, const char* label, Match match, Make make)
+{
+    auto it = std::find_if(g.signals.begin(), g.signals.end(), match);
+    bool on = it != g.signals.end();
+    if (ImGui::Checkbox(label, &on))
+    {
+        if (on)
+        {
+            GraphSignal s = make();
+            s.color = next_color(g);
+            g.signals.push_back(std::move(s));
+        }
+        else
+        {
+            g.signals.erase(it);
+        }
+        g.slots_dirty = true;
+    }
+}
+
+GraphSignal make_can_signal(const SetupNetwork& net, uint32_t raw_id, const CanDbMessage& msg, const CanDbSignal& sig)
+{
+    GraphSignal s;
+    s.kind = GraphSignalKind::Can;
+    s.network = net.name;
+    s.can_msg = &msg;
+    s.can_sig = &sig;
+    s.can_raw_id = raw_id;
+    s.name = sig.name;
+    s.parent = msg.name;
+    s.unit = sig.unit;
+    s.min = sig.min;
+    s.max = sig.max;
+    return s;
+}
+
+GraphSignal make_lin_signal(const SetupNetwork& net, uint8_t id, const LinFrame& frame, const LinSignal& sig)
+{
+    GraphSignal s;
+    s.kind = GraphSignalKind::Lin;
+    s.network = net.name;
+    s.lin_id = id;
+    s.name = sig.name;
+    s.parent = frame.name;
+    s.unit = sig.unit;
+    s.min = sig.min;
+    s.max = sig.max;
+    return s;
+}
+
+GraphSignal make_bus_load_signal(int index, const SetupInterface& si)
+{
+    GraphSignal s;
+    s.kind = GraphSignalKind::BusLoad;
+    s.iface = index;
+    s.bitrate = si.bus_type == BusType::LIN ? si.lin_baudrate : si.bitrate;
+    s.name = std::format("Bus Load - {}", si.name);
+    s.parent = "Bus Load";
+    s.unit = "%";
+    s.max = 100.0;
+    return s;
+}
+
+bool is_lin_signal(const GraphSignal& s, const SetupNetwork& net, uint8_t id, const LinSignal& sig)
+{
+    return s.kind == GraphSignalKind::Lin && s.lin_id == id && s.name == sig.name && s.network == net.name;
+}
+
+// Adds a search / palette hit unless the graph already has it.
+void add_search_hit(GraphState& g, const Setup& setup, const SignalEntry& e)
+{
+    const SetupNetwork& net = setup.networks[e.network];
+    const auto id = static_cast<uint8_t>(e.raw_id);
+    const bool present = std::any_of(g.signals.begin(), g.signals.end(), [&](const GraphSignal& s)
+    {
+        return e.can_sig != nullptr ? s.kind == GraphSignalKind::Can && s.can_sig == e.can_sig : is_lin_signal(s, net, id, *e.lin_sig);
+    });
+    if (present)
+    {
+        return;
+    }
+    GraphSignal s = e.can_sig != nullptr ? make_can_signal(net, e.raw_id, *e.can_msg, *e.can_sig) : make_lin_signal(net, id, *e.lin_frame, *e.lin_sig);
+    s.color = next_color(g);
+    g.signals.push_back(std::move(s));
+}
+
+void draw_signal_tree(App& app, GraphState& g)
+{
+    for (std::size_t ni = 0; ni < app.setup.networks.size(); ++ni)
+    {
+        const SetupNetwork& net = app.setup.networks[ni];
+        ImGui::PushID(static_cast<int>(ni));
+        if (!net.can_dbs.empty())
+        {
+            ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+            if (ImGui::TreeNode("can", "CAN - %s", net.name.c_str()))
+            {
+                for (const auto& db : net.can_dbs)
+                {
+                    for (const auto& [raw_id, msg] : db->messages)
+                    {
+                        if (!ImGui::TreeNode(&msg, "%s (0x%X)", msg.name.c_str(), raw_id & can_id_mask_extended))
+                        {
+                            continue;
+                        }
+                        for (const auto& sig : msg.signals)
+                        {
+                            ImGui::PushID(&sig);
+                            signal_checkbox(g, sig.name.c_str(),
+                                [&](const GraphSignal& s) { return s.kind == GraphSignalKind::Can && s.can_sig == &sig; },
+                                [&] { return make_can_signal(net, raw_id, msg, sig); });
+                            ImGui::SetItemTooltip("%s  [%g .. %g] %s\n%s", sig.is_unsigned ? "Unsigned" : "Signed", sig.min,
+                                                  sig.max, sig.unit.c_str(), sig.comment.c_str());
+                            ImGui::PopID();
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+                ImGui::TreePop();
+            }
+        }
+        if (!net.lin_dbs.empty())
+        {
+            ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+            if (ImGui::TreeNode("lin", "LIN - %s", net.name.c_str()))
+            {
+                for (const auto& db : net.lin_dbs)
+                {
+                    for (const auto& [id, frame] : db->frames)
+                    {
+                        if (!ImGui::TreeNode(&frame, "%s (0x%02X)", frame.name.c_str(), id))
+                        {
+                            continue;
+                        }
+                        for (const auto& sig : frame.signals)
+                        {
+                            ImGui::PushID(&sig);
+                            signal_checkbox(g, sig.name.c_str(),
+                                [&](const GraphSignal& s) { return is_lin_signal(s, net, id, sig); },
+                                [&] { return make_lin_signal(net, id, frame, sig); });
+                            ImGui::PopID();
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+                ImGui::TreePop();
+            }
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::TreeNode("Virtual"))
+    {
+        for (const auto& net : app.setup.networks)
+        {
+            for (const auto& si : net.interfaces)
+            {
+                const int index = ifaces_find(app.ifaces, si.driver, si.name);
+                if (index < 0)
+                {
+                    continue;
+                }
+                const std::string label = std::format("Bus Load - {}", si.name);
+                ImGui::PushID(index);
+                signal_checkbox(g, label.c_str(),
+                    [&](const GraphSignal& s) { return s.kind == GraphSignalKind::BusLoad && s.iface == index; },
+                    [&] { return make_bus_load_signal(index, si); });
+                ImGui::SetItemTooltip("0..100 %%, 1 s rolling window");
+                ImGui::PopID();
+            }
+        }
+        ImGui::TreePop();
+    }
+}
+
+// The active signals: colour, value (A, B and B - A when the cursors are on), plot slot. Rows drag onto
+// a Y axis; right-click for the axis, visibility and removal.
+void draw_signal_list(GraphState& g, std::span<const int> slots)
+{
+    const int slot_count = slots.empty() ? 1 : *std::max_element(slots.begin(), slots.end()) + 1;
+    // j/k/gg/G pick a row, Space toggles its visibility; only while the list itself has focus,
+    // so the fuzzy search list above keeps its own j/k.
+    const int count = static_cast<int>(g.signals.size());
+    g.selected = std::min(g.selected, count - 1);
+    bool moved = false;
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+    {
+        bool focus_search = false;
+        int h_delta = 0;
+        const int page = std::max(1, static_cast<int>(ImGui::GetContentRegionAvail().y / ImGui::GetFrameHeightWithSpacing()));
+        moved = vim_nav(g.vim, g.selected, count, page, focus_search, h_delta);
+        if (g.selected >= 0 && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Space, false))
+        {
+            g.signals[static_cast<std::size_t>(g.selected)].hidden ^= true;
+        }
+    }
+    if (g.cursor_on)
+    {
+        update_cursor_values(g);
+        ImGui::TextUnformatted(graph_delta_t_text(g.cursor_a, g.cursor_b).c_str());
+    }
+    constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY
+                                      | ImGuiTableFlags_SizingStretchProp;
+    // Different ids per column count: ImGui keeps column state per table id.
+    const int columns = 3 + (g.cursor_on ? 2 : 0) + (g.statistics ? 4 : 0);
+    if (!ImGui::BeginTable(std::format("##active{}", columns).c_str(), columns, flags))
+    {
+        return;
+    }
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Signal", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+    if (g.cursor_on)
+    {
+        ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("\u0394 (B-A)", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+    }
+    else
+    {
+        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+    }
+    ImGui::TableSetupColumn("Axis", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    if (g.statistics)
+    {
+        ImGui::TableSetupColumn("Min", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Max", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Mean", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Median", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+    }
+    ImGui::TableHeadersRow();
+    int remove = -1;
+    for (int i = 0; i < static_cast<int>(g.signals.size()); ++i)
+    {
+        GraphSignal& s = g.signals[static_cast<std::size_t>(i)];
+        const int slot = slots[static_cast<std::size_t>(i)];
+        ImGui::PushID(i);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        bool shown = !s.hidden;
+        if (ImGui::Checkbox("##shown", &shown))
+        {
+            s.hidden = !shown;
+        }
+        ImGui::SameLine();
+        ImVec4 col = ImGui::ColorConvertU32ToFloat4(s.color);
+        if (ImGui::ColorEdit4("##color", &col.x, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
+        {
+            s.color = ImGui::ColorConvertFloat4ToU32(col);
+        }
+        ImGui::SameLine();
+        if (s.hidden)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        }
+        if (ImGui::Selectable(s.name.c_str(), i == g.selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
+        {
+            g.selected = i;
+        }
+        if (moved && i == g.selected)
+        {
+            ImGui::SetScrollHereY();
+        }
+        if (s.hidden)
+        {
+            ImGui::PopStyleColor();
+        }
+        ImGui::SetItemTooltip("%s / %s", s.parent.c_str(), s.name.c_str());
+        if (ImGui::BeginDragDropSource())
+        {
+            ImGui::SetDragDropPayload(drag_payload, &i, sizeof i);
+            ImGui::Text("%s -> drop on a Y axis", s.name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginPopupContextItem("##signal_menu"))
+        {
+            if (ImGui::MenuItem("Auto (by unit and range)", nullptr, s.axis < 0))
+            {
+                s.axis = -1;
+                g.slots_dirty = true;
+            }
+            for (int k = 0; k <= slot_count && k < 4 * graph_axes_per_plot; ++k)
+            {
+                const std::string label = std::format("Y{} of plot {}", k % graph_axes_per_plot + 1, k / graph_axes_per_plot + 1);
+                if (ImGui::MenuItem(label.c_str(), nullptr, s.axis == k))
+                {
+                    s.axis = k;
+                    g.slots_dirty = true;
+                }
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Hidden", nullptr, &s.hidden);
+            if (ImGui::MenuItem("Remove"))
+            {
+                remove = i;
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::TableNextColumn();
+        if (g.cursor_on)
+        {
+            ImGui::Text("%s %s", graph_format_value(s, s.at_cursor[0]).c_str(), s.unit.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%s %s", graph_format_value(s, s.at_cursor[1]).c_str(), s.unit.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%s %s", graph_format_value(s, s.at_cursor[2]).c_str(), s.unit.c_str());
+        }
+        else
+        {
+            const double v = s.v.empty() ? std::numeric_limits<double>::quiet_NaN() : s.v.back();
+            ImGui::Text("%s %s", graph_format_value(s, v).c_str(), s.unit.c_str());
+        }
+        ImGui::TableNextColumn();
+        if (g.view == GraphView::XY)
+        {
+            ImGui::RadioButton("X##x", &g.x_signal, i);
+            ImGui::SetItemTooltip("Use as the X axis; the other signals are plotted against it");
+        }
+        else
+        {
+            ImGui::Text("%sY%d/%d", s.axis < 0 ? "" : "*", slot % graph_axes_per_plot + 1, slot / graph_axes_per_plot + 1);
+        }
+        if (g.statistics)
+        {
+            // ponytail: recomputed when (x range, samples, newest t) changed, at most every 250 ms,
+            // so a following window under a flood costs one O(visible points) pass per 250 ms,
+            // not per frame. Incremental min/max/mean + a two-heap median if that is still too slow.
+            const std::array<double, 4> key{g.x_min, g.x_max, static_cast<double>(s.t.size()),
+                                            s.t.empty() ? 0.0 : s.t.back()};
+            if (const double now = wall_seconds(); key != s.stats_key && now - s.stats_wall >= 0.25)
+            {
+                static std::vector<double> scratch; // main thread only, reused so it stops growing
+                const auto lo = std::lower_bound(s.t.begin(), s.t.end(), g.x_min);
+                const auto hi = std::upper_bound(lo, s.t.end(), g.x_max);
+                const auto first = s.v.begin() + (lo - s.t.begin());
+                scratch.assign(first, first + (hi - lo));
+                const Stats st = stats_of(scratch);
+                const double nan = std::numeric_limits<double>::quiet_NaN();
+                s.stats = scratch.empty() ? std::array{nan, nan, nan, nan} : std::array{st.min, st.max, st.mean, st.median};
+                s.stats_key = key;
+                s.stats_wall = now;
+            }
+            for (double x : s.stats)
+            {
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(graph_format_value(s, x).c_str());
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+    if (remove >= 0)
+    {
+        g.signals.erase(g.signals.begin() + remove);
+        g.x_signal -= remove < g.x_signal ? 1 : 0;
+        g.slots_dirty = true;
+    }
+}
+
+// Time window [x_min, x_max] follows the newest data while `follow` is on.
+void follow_window(const App& app, GraphState& g)
+{
+    if (g.follow)
+    {
+        const double d = duration_secs[g.duration];
+        g.x_max = std::max(graph_now(g, app.measuring), d > 0.0 ? 0.0 : 1.0);
+        g.x_min = d > 0.0 ? g.x_max - d : 0.0;
+    }
+}
+
+// Every g.downsample-th sample of s (the Downsample field), or s itself; the spans stay valid
+// until the next call.
+std::pair<std::span<const double>, std::span<const double>> stride(GraphState& g, const GraphSignal& s)
+{
+    if (g.downsample <= 1)
+    {
+        return {s.t, s.v};
+    }
+    g.stride_t.clear();
+    g.stride_v.clear();
+    for (std::size_t k = 0; k < s.t.size(); k += static_cast<std::size_t>(g.downsample))
+    {
+        g.stride_t.push_back(s.t[k]);
+        g.stride_v.push_back(s.v[k]);
+    }
+    return {g.stride_t, g.stride_v};
+}
+
+// Y signals against the X signal over the time window, e.g. lat/lon track or RPM vs speed.
+void draw_xy(App& app, GraphState& g)
+{
+    follow_window(app, g);
+    if (g.signals.size() < 2)
+    {
+        ImGui::TextDisabled("XY needs two signals: pick one as X in the Axis column, the others are Y.");
+        return;
+    }
+    g.x_signal = std::clamp(g.x_signal, 0, static_cast<int>(g.signals.size()) - 1);
+    const GraphSignal& xs = g.signals[static_cast<std::size_t>(g.x_signal)];
+    const auto with_unit = [](const GraphSignal& s) { return s.unit.empty() ? s.name : std::format("{} [{}]", s.name, s.unit); };
+    std::string y_label;
+    for (std::size_t i = 0; i < g.signals.size(); ++i)
+    {
+        if (static_cast<int>(i) != g.x_signal && !g.signals[i].hidden)
+        {
+            y_label += (y_label.empty() ? "" : ", ") + with_unit(g.signals[i]);
+        }
+    }
+    if (!ImPlot::BeginPlot("##xy", ImGui::GetContentRegionAvail()))
+    {
+        return;
+    }
+    const std::string x_label = with_unit(xs);
+    ImPlot::SetupAxes(x_label.c_str(), y_label.c_str(), ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+    const float px = ImGui::GetFontSize() / 15.0f;
+    update_cursor_values(g);
+    for (std::size_t i = 0; i < g.signals.size(); ++i)
+    {
+        const GraphSignal& s = g.signals[i];
+        if (static_cast<int>(i) == g.x_signal || s.hidden)
+        {
+            continue;
+        }
+        const auto [t, v] = stride(g, s);
+        graph_xy_pair(xs.t, xs.v, t, v, g.x_min, g.x_max, g.scratch_t, g.scratch_v);
+        const int n = static_cast<int>(g.scratch_t.size());
+        if (n == 0)
+        {
+            continue;
+        }
+        const ImVec4 color = ImGui::ColorConvertU32ToFloat4(s.color);
+        const std::string label = std::format("{}##{}", s.name, i);
+        ImPlotSpec spec;
+        spec.LineColor = color;
+        spec.FillColor = color;
+        spec.LineWeight = 2.0f * px;
+        ImPlot::PlotLine(label.c_str(), g.scratch_t.data(), g.scratch_v.data(), n, spec);
+        spec.Marker = ImPlotMarker_Circle; // the latest point
+        spec.MarkerSize = 5.0f * px;
+        ImPlot::PlotScatter(label.c_str(), &g.scratch_t.back(), &g.scratch_v.back(), 1, spec);
+        for (int k = 0; g.cursor_on && k < 2; ++k) // the curve's point at cursor time A / B
+        {
+            const double x = xs.at_cursor[static_cast<std::size_t>(k)];
+            const double y = s.at_cursor[static_cast<std::size_t>(k)];
+            if (!std::isnan(x) && !std::isnan(y))
+            {
+                spec.LineColor = spec.FillColor = cursor_color(k);
+                spec.MarkerSize = 6.0f * px;
+                ImPlot::PlotScatter(label.c_str(), &x, &y, 1, spec);
+                ImPlot::Annotation(x, y, cursor_color(k), ImVec2(8.0f * px, -8.0f * px), true, "%s", k == 0 ? "A" : "B");
+            }
+        }
+    }
+    ImPlot::EndPlot();
+}
+
+void draw_plots(App& app, GraphState& g, std::span<const int> slots)
+{
+    const int slot_count = slots.empty() ? 1 : *std::max_element(slots.begin(), slots.end()) + 1;
+    const int rows = (slot_count + graph_axes_per_plot - 1) / graph_axes_per_plot;
+    follow_window(app, g);
+    update_cursor_values(g);
+
+    // Title of a subplot: the units on it, as the screenshot's per-plot titles.
+    const auto row_title = [&](int row)
+    {
+        std::string title;
+        for (std::size_t i = 0; i < g.signals.size(); ++i)
+        {
+            const std::string& u = g.signals[i].unit.empty() ? g.signals[i].parent : g.signals[i].unit;
+            if (slots[i] / graph_axes_per_plot == row && title.find(u) == std::string::npos)
+            {
+                title += title.empty() ? u : ", " + u;
+            }
+        }
+        return std::format("{}##row{}", title.empty() ? "Graph" : title, row);
+    };
+
+    const auto plot_row = [&](int row)
+    {
+        ImPlot::SetupAxis(ImAxis_X1, row == rows - 1 ? "time[s]" : nullptr);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &g.x_min, &g.x_max);
+        for (int k = 0; k < graph_axes_per_plot; ++k)
+        {
+            const int slot = row * graph_axes_per_plot + k;
+            // Label: the units on the axis, "name [unit]" when one signal is alone on it; text in
+            // the colour of its first signal so each curve finds its axis.
+            std::string label;
+            const GraphSignal* first = nullptr;
+            int on_axis = 0;
+            for (std::size_t i = 0; i < g.signals.size(); ++i)
+            {
+                if (slots[i] != slot)
+                {
+                    continue;
+                }
+                first = first != nullptr ? first : &g.signals[i];
+                ++on_axis;
+                if (label.find(g.signals[i].unit) == std::string::npos)
+                {
+                    label += label.empty() ? g.signals[i].unit : ", " + g.signals[i].unit;
+                }
+            }
+            if (first == nullptr && k > 0)
+            {
+                continue;
+            }
+            if (on_axis == 1)
+            {
+                label = first->unit.empty() ? first->name : std::format("{} [{}]", first->name, first->unit);
+            }
+            ImPlotAxisFlags flags = k > 0 ? ImPlotAxisFlags_AuxDefault : ImPlotAxisFlags_None;
+            flags |= g.follow ? ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit : ImPlotAxisFlags_None;
+            if (first != nullptr)
+            {
+                ImPlot::PushStyleColor(ImPlotCol_AxisText, first->color);
+            }
+            ImPlot::SetupAxis(ImAxis_Y1 + k, label.empty() ? nullptr : label.c_str(), flags);
+            if (first != nullptr)
+            {
+                ImPlot::PopStyleColor();
+            }
+        }
+        ImPlot::SetupFinish();
+
+        const int buckets = std::max(1, static_cast<int>(ImPlot::GetPlotSize().x));
+        const float px = ImGui::GetFontSize() / 15.0f;
+        for (std::size_t i = 0; i < g.signals.size(); ++i)
+        {
+            const GraphSignal& s = g.signals[i];
+            if (slots[i] / graph_axes_per_plot != row || s.hidden)
+            {
+                continue;
+            }
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1 + slots[i] % graph_axes_per_plot);
+            const auto [t, v] = stride(g, s);
+            graph_decimate(t, v, g.x_min, g.x_max, buckets, g.scratch_t, g.scratch_v);
+            const ImVec4 color = ImGui::ColorConvertU32ToFloat4(s.color);
+            ImPlotSpec spec;
+            spec.LineColor = color;
+            spec.FillColor = color;
+            spec.Marker = ImPlotMarker_Circle;
+            spec.MarkerSize = 2.5f * px;
+            spec.LineWeight = 2.5f * px;
+            const std::string label = std::format("{}##{}", s.name, i);
+            ImPlot::PlotLine(label.c_str(), g.scratch_t.data(), g.scratch_v.data(), static_cast<int>(g.scratch_t.size()), spec);
+            for (int k = 0; g.cursor_on && k < 2; ++k)
+            {
+                const double y = s.at_cursor[static_cast<std::size_t>(k)];
+                if (!std::isnan(y))
+                {
+                    ImPlot::Annotation(k == 0 ? g.cursor_a : g.cursor_b, y, color, ImVec2(8.0f * px, -8.0f * px), true,
+                                       "%s: %s %s", s.name.c_str(), graph_format_value(s, y).c_str(), s.unit.c_str());
+                }
+            }
+        }
+
+        const auto accept = [&](int slot)
+        {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload(drag_payload))
+            {
+                const int i = *static_cast<const int*>(p->Data);
+                if (i >= 0 && i < static_cast<int>(g.signals.size()))
+                {
+                    g.signals[static_cast<std::size_t>(i)].axis = slot;
+                    g.slots_dirty = true;
+                }
+            }
+            ImGui::EndDragDropTarget();
+        };
+        for (int k = 0; k < graph_axes_per_plot; ++k)
+        {
+            // Only axes set up above: an unused Y2/Y3 has id 0 and asserts in BeginDragDropTargetCustom.
+            if (k > 0 && std::find(slots.begin(), slots.end(), row * graph_axes_per_plot + k) == slots.end())
+            {
+                continue;
+            }
+            if (ImPlot::BeginDragDropTargetAxis(ImAxis_Y1 + k))
+            {
+                accept(row * graph_axes_per_plot + k);
+            }
+        }
+        if (ImPlot::BeginDragDropTargetPlot()) // the plot area: a new slot, i.e. a new axis or subplot
+        {
+            accept(slot_count);
+        }
+
+        bool cursor_held = false;
+        for (int k = 0; g.cursor_on && k < 2; ++k)
+        {
+            double& x = k == 0 ? g.cursor_a : g.cursor_b;
+            bool held = false;
+            ImPlot::DragLineX(k, &x, cursor_color(k), 1.5f, ImPlotDragToolFlags_None, nullptr, nullptr, &held);
+            ImPlot::TagX(x, cursor_color(k), "%s %.3f s", k == 0 ? "A" : "B", x);
+            cursor_held |= held;
+        }
+        const ImGuiIO& io = ImGui::GetIO();
+        // a / b over the plot put cursor A / B at the mouse (typed characters, as vim_nav: any layout;
+        // vim_nav has no a/b and only acts on the focused list).
+        if (ImPlot::IsPlotHovered() && !io.WantTextInput)
+        {
+            for (const ImWchar c : io.InputQueueCharacters)
+            {
+                if (c == 'a' || c == 'b')
+                {
+                    (c == 'a' ? g.cursor_a : g.cursor_b) = ImPlot::GetPlotMousePos(ImAxis_X1, ImAxis_Y1).x;
+                    g.cursor_on = true;
+                }
+            }
+        }
+        if (ImPlot::IsPlotHovered() && !cursor_held
+            && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)
+                || io.MouseWheel != 0.0f))
+        {
+            g.follow = false; // the user pans or zooms: stop following the newest data
+        }
+    };
+
+    const ImVec2 size = ImGui::GetContentRegionAvail();
+    constexpr ImPlotFlags plot_flags = ImPlotFlags_None;
+    if (rows == 1)
+    {
+        if (ImPlot::BeginPlot(row_title(0).c_str(), size, plot_flags))
+        {
+            plot_row(0);
+            ImPlot::EndPlot();
+        }
+    }
+    else if (ImPlot::BeginSubplots("##graphs", rows, 1, size, ImPlotSubplotFlags_LinkAllX | ImPlotSubplotFlags_NoTitle))
+    {
+        for (int row = 0; row < rows; ++row)
+        {
+            if (ImPlot::BeginPlot(row_title(row).c_str(), ImVec2(-1, 0), plot_flags))
+            {
+                plot_row(row);
+                ImPlot::EndPlot();
+            }
+        }
+        ImPlot::EndSubplots();
+    }
+}
+
+// Long format: signal, t, value. One row per sample of every visible signal.
+void export_csv(const GraphState& g, const std::string& path)
+{
+    std::ofstream out(path, std::ios::binary);
+    out << "signal,unit,time_s,value\n";
+    for (const auto& s : g.signals)
+    {
+        if (s.hidden)
+        {
+            continue;
+        }
+        for (std::size_t i = 0; i < s.t.size(); ++i)
+        {
+            out << s.name << ',' << s.unit << ',' << std::format("{:.6f},{:.9g}", s.t[i], s.v[i]) << '\n';
+        }
+    }
+    if (!out)
+    {
+        log_error(std::format("Graph: could not write {}", path));
+    }
+}
+
+// Text cards and gauges share the grid; `cell` draws one signal.
+template <class Cell>
+void draw_grid(GraphState& g, Cell cell)
+{
+    if (!ImGui::BeginTable("##grid", std::max(1, g.columns), ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_ScrollY))
+    {
+        return;
+    }
+    for (std::size_t i = 0; i < g.signals.size(); ++i)
+    {
+        if (g.signals[i].hidden)
+        {
+            continue;
+        }
+        ImGui::TableNextColumn();
+        ImGui::PushID(static_cast<int>(i));
+        cell(g.signals[i]);
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+}
+
+void draw_text_card(const GraphSignal& s)
+{
+    const float font = ImGui::GetFontSize();
+    ImGui::PushStyleColor(ImGuiCol_Border, s.color);
+    if (ImGui::BeginChild("##card", ImVec2(0.0f, font * 5.0f), ImGuiChildFlags_Borders))
+    {
+        ImGui::TextDisabled("%s", s.parent.c_str());
+        ImGui::TextUnformatted(s.name.c_str());
+        ImGui::PushFont(nullptr, font * 2.0f);
+        const std::string value = graph_format_value(s, s.v.empty() ? std::numeric_limits<double>::quiet_NaN() : s.v.back());
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(s.color), "%s", value.c_str());
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(s.unit.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+// 240 degree arc, gap at the bottom; DBC min/max, or the seen range when the DBC has none.
+void draw_gauge(const GraphSignal& s)
+{
+    const float font = ImGui::GetFontSize();
+    const float w = ImGui::GetContentRegionAvail().x;
+    const float r = std::clamp(w * 0.4f, font * 2.0f, font * 10.0f);
+    const float thick = std::max(4.0f, r * 0.12f);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 c(p.x + w * 0.5f, p.y + r + thick);
+    constexpr float pi = std::numbers::pi_v<float>;
+    constexpr float a0 = pi * 5.0f / 6.0f;
+    constexpr float a1 = a0 + pi * 4.0f / 3.0f;
+    double lo = s.min;
+    double hi = s.max;
+    if (hi <= lo)
+    {
+        lo = s.seen_min;
+        hi = s.seen_max > s.seen_min ? s.seen_max : s.seen_min + 1.0;
+    }
+    const double v = s.v.empty() ? lo : s.v.back();
+    const float frac = static_cast<float>(std::clamp((v - lo) / (hi - lo), 0.0, 1.0));
+    const float a = a0 + frac * (a1 - a0);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PathArcTo(c, r, a0, a1, 48);
+    dl->PathStroke(ImGui::GetColorU32(ImGuiCol_FrameBg), ImDrawFlags_None, thick);
+    if (!s.v.empty())
+    {
+        dl->PathArcTo(c, r, a0, a, 48);
+        dl->PathStroke(s.color, ImDrawFlags_None, thick);
+        dl->AddLine(c, ImVec2(c.x + std::cos(a) * r * 0.8f, c.y + std::sin(a) * r * 0.8f), ImGui::GetColorU32(ImGuiCol_Text), 2.0f);
+    }
+    dl->AddCircleFilled(c, thick * 0.4f, ImGui::GetColorU32(ImGuiCol_Text));
+    const auto centered = [&](float y, ImU32 col, const std::string& text)
+    {
+        const float tw = ImGui::CalcTextSize(text.c_str()).x;
+        dl->AddText(ImVec2(c.x - tw * 0.5f, y), col, text.c_str());
+    };
+    const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    centered(c.y + r * 0.35f, text, std::format("{} {}", graph_format_value(s, s.v.empty() ? std::nan("") : v), s.unit));
+    const float bottom = c.y + r * std::sin(a0) + thick;
+    dl->AddText(ImVec2(c.x + std::cos(a0) * r - font, bottom), dim, graph_format_value(s, lo).c_str());
+    const std::string hi_text = graph_format_value(s, hi);
+    dl->AddText(ImVec2(c.x + std::cos(a1) * r - ImGui::CalcTextSize(hi_text.c_str()).x + font, bottom), dim, hi_text.c_str());
+    centered(bottom + font * 1.2f, text, s.name);
+    ImGui::Dummy(ImVec2(w, bottom + font * 2.6f - p.y));
+}
+
+void draw_toolbar(App& app, GraphState& g)
+{
+    const float px = ImGui::GetFontSize() / 15.0f;
+    int view = static_cast<int>(g.view);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("View Type:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0f * px);
+    if (ImGui::Combo("##view", &view, view_names, IM_ARRAYSIZE(view_names)))
+    {
+        g.view = static_cast<GraphView>(view);
+    }
+    ImGui::SameLine();
+    const bool plot = g.view == GraphView::TimeSeries || g.view == GraphView::XY;
+    if (plot)
+    {
+        ImGui::TextUnformatted("Duration:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80.0f * px);
+        if (ImGui::Combo("##duration", &g.duration, duration_names, IM_ARRAYSIZE(duration_names)))
+        {
+            g.follow = true;
+        }
+        ImGui::SameLine();
+        const double mid = (g.x_min + g.x_max) * 0.5;
+        const double half = (g.x_max - g.x_min) * 0.5;
+        if (ImGui::Button("Zoom +"))
+        {
+            g.follow = false;
+            g.x_min = mid - half * 0.5;
+            g.x_max = mid + half * 0.5;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Zoom -"))
+        {
+            g.follow = false;
+            g.x_min = mid - half * 2.0;
+            g.x_max = mid + half * 2.0;
+        }
+        same_line_or_wrap(icon_text_button_width("Reset Zoom"));
+        if (icon_text_button("Reset Zoom", Icon::ViewRefresh))
+        {
+            g.follow = true;
+        }
+        ImGui::SetItemTooltip("Follow the newest data and fit the Y axes");
+    }
+    else
+    {
+        ImGui::TextUnformatted("Columns:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80.0f * px);
+        ImGui::SliderInt("##columns", &g.columns, 1, 4);
+    }
+    same_line_or_wrap(icon_text_button_width("Clear"));
+    if (icon_text_button("Clear", Icon::EditClear))
+    {
+        clear_samples(g);
+        g.next_index = app.trace.end;
+    }
+}
+
+void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
+{
+    const std::string title = g.id == 0 ? std::string("Graph") : std::format("Graph {}", g.id);
+    const float px = ImGui::GetFontSize() / 15.0f;
+    if (g.id != 0)
+    {
+        ImGui::SetNextWindowSize(ImVec2(900.0f * px, 550.0f * px), ImGuiCond_FirstUseEver);
+    }
+    if (g.standalone)
+    {
+        ImGuiWindowClass wc;
+        wc.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge; // its own OS window
+        ImGui::SetNextWindowClass(&wc);
+    }
+    const bool visible = ImGui::Begin(workspace_window_name(tab, title.c_str()).c_str(), g.id == 0 ? nullptr : &g.open);
+    if (visible)
+    {
+        draw_toolbar(app, g);
+        if (ImGui::BeginChild("##side", ImVec2(280.0f * px, 0.0f), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders))
+        {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const SignalEntry* hit = signal_search_input(g.finder, app.setup, "Search signals...", g.search);
+            if (ImGui::BeginChild("##tree", ImVec2(0.0f, ImGui::GetContentRegionAvail().y * 0.45f),
+                                  ImGuiChildFlags_ResizeY | ImGuiChildFlags_Borders))
+            {
+                if (g.search.empty())
+                {
+                    draw_signal_tree(app, g);
+                }
+                else if (const SignalEntry* e = signal_search_list(g.finder))
+                {
+                    hit = e;
+                }
+            }
+            ImGui::EndChild();
+            if (hit != nullptr)
+            {
+                add_search_hit(g, app.setup, *hit);
+            }
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Downsample:");
+            ImGui::SameLine(110.0f * px);
+            ImGui::SetNextItemWidth(80.0f * px);
+            if (ImGui::InputInt("##downsample", &g.downsample))
+            {
+                g.downsample = std::max(1, g.downsample);
+            }
+            ImGui::SetItemTooltip("Keep every Nth sample before drawing");
+            ImGui::TextUnformatted("Cursors:");
+            ImGui::SameLine(110.0f * px);
+            if (ImGui::Checkbox("##cursors", &g.cursor_on) && g.cursor_on)
+            {
+                g.cursor_a = g.x_min + (g.x_max - g.x_min) / 3.0;
+                g.cursor_b = g.x_min + (g.x_max - g.x_min) * 2.0 / 3.0;
+            }
+            ImGui::SetItemTooltip("Cursors A and B: drag them, or press a / b over the time series plot.\n"
+                                  "XY shows each curve's point at the cursor times.");
+            ImGui::TextUnformatted("Statistics:");
+            ImGui::SameLine(110.0f * px);
+            ImGui::Checkbox("##statistics", &g.statistics);
+            const float button_h = ImGui::GetFrameHeightWithSpacing();
+            if (ImGui::BeginChild("##list", ImVec2(0.0f, -button_h)))
+            {
+                // After the tree: a checkbox there may have added or removed a signal this frame.
+                draw_signal_list(g, graph_slots(g));
+            }
+            ImGui::EndChild();
+            if (ImGui::Button("Export plot to *.csv", ImVec2(-FLT_MIN, 0.0f)))
+            {
+                file_dialog_open(g.export_dialog, FileDialogMode::Save, "Export plot", "graph.csv", {{"CSV files", "*.csv"}});
+            }
+            if (ImGui::Button("Export to PNG", ImVec2(-FLT_MIN, 0.0f)))
+            {
+                file_dialog_open(g.export_dialog, FileDialogMode::Save, "Export plot as PNG", "graph.png", {{"PNG image", "*.png"}});
+            }
+            for (const auto& path : file_dialog_draw(g.export_dialog))
+            {
+                if (path.ends_with(".png"))
+                {
+                    // ponytail: the capture reads the main framebuffer, so a graph in its own OS
+                    // window (multi-viewport) cannot be exported; dock it first.
+                    if (ImGui::GetWindowViewport() != ImGui::GetMainViewport())
+                    {
+                        log_error("Graph: Export to PNG needs the graph inside the main window; dock it first");
+                        continue;
+                    }
+                    app.screenshot = App::Screenshot{.path = path, .x = g.view_x, .y = g.view_y, .w = g.view_w, .h = g.view_h};
+                }
+                else
+                {
+                    export_csv(g, path);
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+        if (ImGui::BeginChild("##view"))
+        {
+            g.view_x = ImGui::GetWindowPos().x;
+            g.view_y = ImGui::GetWindowPos().y;
+            g.view_w = ImGui::GetWindowSize().x;
+            g.view_h = ImGui::GetWindowSize().y;
+            // The list may have removed a signal this frame; the slots must match again.
+            const std::vector<int>& now_slots = graph_slots(g);
+            switch (g.view)
+            {
+            case GraphView::TimeSeries:
+                draw_plots(app, g, now_slots);
+                break;
+            case GraphView::XY:
+                draw_xy(app, g);
+                break;
+            case GraphView::Text:
+                draw_grid(g, draw_text_card);
+                break;
+            case GraphView::Gauge:
+                draw_grid(g, draw_gauge);
+                break;
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
+// Ctrl+P: centred "Find signal" popup; Enter / double-click adds the hit to the tab's default graph.
+void draw_find_signal(App& app, const WorkspaceTab& tab, GraphState& g)
+{
+    const float px = ImGui::GetFontSize() / 15.0f;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(520.0f * px, 380.0f * px), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopup("Find signal"))
+    {
+        return;
+    }
+    ImGui::TextUnformatted("Find signal");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const SignalEntry* hit = signal_search_input(g.palette, app.setup, "Message.Signal...", g.palette_query, ImGui::IsWindowAppearing());
+    if (ImGui::BeginChild("##hits", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders))
+    {
+        if (const SignalEntry* e = signal_search_list(g.palette))
+        {
+            hit = e;
+        }
+    }
+    ImGui::EndChild();
+    if (hit != nullptr)
+    {
+        add_search_hit(g, app.setup, *hit);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+    if (hit != nullptr)
+    {
+        ImGui::SetWindowFocus(workspace_window_name(tab, "Graph").c_str());
+    }
+}
+
+// A <signal> of a saved graph back to a GraphSignal of the current setup; false when it is gone.
+bool load_signal(const Setup& setup, const std::deque<Iface>& ifaces, pugi::xml_node el, GraphSignal& out)
+{
+    const std::string_view kind = el.attribute("kind").as_string();
+    if (kind == "busload")
+    {
+        const std::string_view driver = el.attribute("driver").as_string();
+        const std::string_view iface = el.attribute("iface").as_string();
+        const int index = ifaces_find(ifaces, driver, iface);
+        for (const auto& net : setup.networks)
+        {
+            for (const auto& si : net.interfaces)
+            {
+                if (index >= 0 && si.name == iface && si.driver == driver)
+                {
+                    out = make_bus_load_signal(index, si);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    const std::string_view parent = el.attribute("message").as_string();
+    const std::string_view name = el.attribute("name").as_string();
+    for (const auto& net : setup.networks)
+    {
+        if (net.name != el.attribute("network").as_string())
+        {
+            continue;
+        }
+        for (const auto& db : net.can_dbs)
+        {
+            for (const auto& [raw_id, msg] : db->messages)
+            {
+                const CanDbSignal* sig = kind == "can" && msg.name == parent ? can_db_find_signal(msg, name) : nullptr;
+                if (sig != nullptr)
+                {
+                    out = make_can_signal(net, raw_id, msg, *sig);
+                    return true;
+                }
+            }
+        }
+        for (const auto& db : net.lin_dbs)
+        {
+            for (const auto& [id, frame] : db->frames)
+            {
+                if (kind != "lin" || frame.name != parent)
+                {
+                    continue;
+                }
+                const auto sig = std::find_if(frame.signals.begin(), frame.signals.end(), [&](const LinSignal& ls) { return ls.name == name; });
+                if (sig != frame.signals.end())
+                {
+                    out = make_lin_signal(net, id, frame, *sig);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+double graph_value_at(std::span<const double> t, std::span<const double> v, double time)
+{
+    const auto it = std::upper_bound(t.begin(), t.end(), time);
+    return it == t.begin() ? std::numeric_limits<double>::quiet_NaN() : v[static_cast<std::size_t>(it - t.begin() - 1)];
+}
+
+const std::array<double, 3>& graph_cursor_values(GraphSignal& s, double a, double b)
+{
+    const std::array<double, 4> key{a, b, static_cast<double>(s.t.size()), s.t.empty() ? 0.0 : s.t.back()};
+    if (key != s.cursor_key)
+    {
+        const double va = graph_value_at(s.t, s.v, a);
+        const double vb = graph_value_at(s.t, s.v, b);
+        s.at_cursor = {va, vb, vb - va};
+        s.cursor_key = key;
+    }
+    return s.at_cursor;
+}
+
+std::string graph_delta_t_text(double a, double b)
+{
+    const double dt = b - a;
+    return std::format("\u0394t = {:.6g} ms  (1/\u0394t = {} Hz)", dt * 1e3,
+                       dt == 0.0 ? std::string("-") : std::format("{:.6g}", 1.0 / std::abs(dt)));
+}
+
+std::string graph_format_value(const GraphSignal& s, double v)
+{
+    if (std::isnan(v))
+    {
+        return "-";
+    }
+    const SignalValueType type = s.kind == GraphSignalKind::Can && s.can_sig != nullptr ? s.can_sig->value_type : SignalValueType::integer;
+    const int digits = type == SignalValueType::float32 ? 7 : type == SignalValueType::float64 ? 15 : 6;
+    return std::format("{:.{}g}", v, digits);
+}
+
+void graph_save_xml(std::span<const GraphState> graphs, const std::deque<Iface>& ifaces, pugi::xml_node tab)
+{
+    for (const GraphState& g : graphs)
+    {
+        if (!g.open)
+        {
+            continue;
+        }
+        pugi::xml_node el = tab.append_child("graph");
+        el.append_attribute("id") = g.id;
+        el.append_attribute("standalone") = g.standalone;
+        el.append_attribute("view") = view_keys[static_cast<int>(g.view)];
+        el.append_attribute("duration") = g.duration;
+        el.append_attribute("columns") = g.columns;
+        el.append_attribute("x-signal") = g.x_signal;
+        el.append_attribute("downsample") = g.downsample;
+        el.append_attribute("cursors") = g.cursor_on;
+        el.append_attribute("cursor-a") = g.cursor_a; // seconds since the measurement's first frame
+        el.append_attribute("cursor-b") = g.cursor_b;
+        el.append_attribute("statistics") = g.statistics;
+        for (const GraphSignal& s : g.signals)
+        {
+            pugi::xml_node se = el.append_child("signal");
+            se.append_attribute("kind") = kind_keys[static_cast<int>(s.kind)];
+            if (s.kind == GraphSignalKind::BusLoad)
+            {
+                const bool known = s.iface >= 0 && static_cast<std::size_t>(s.iface) < ifaces.size();
+                const Iface* iface = known ? &ifaces[static_cast<std::size_t>(s.iface)] : nullptr;
+                se.append_attribute("driver") = iface != nullptr && iface->ops != nullptr ? iface->ops->name : "";
+                se.append_attribute("iface") = iface != nullptr ? iface->info.name.c_str() : "";
+            }
+            else
+            {
+                se.append_attribute("network") = s.network.c_str();
+                se.append_attribute("message") = s.parent.c_str();
+                se.append_attribute("name") = s.name.c_str();
+            }
+            se.append_attribute("color") = std::format("0x{:08X}", s.color).c_str();
+            se.append_attribute("axis") = s.axis;
+            se.append_attribute("hidden") = s.hidden;
+        }
+    }
+}
+
+void graph_load_xml(std::vector<GraphState>& graphs, const Setup& setup, const std::deque<Iface>& ifaces,
+                    pugi::xml_node tab)
+{
+    constexpr int duration_count = static_cast<int>(std::size(duration_names));
+    for (const pugi::xml_node el : tab.children("graph"))
+    {
+        GraphState& g = graphs.emplace_back();
+        g.id = el.attribute("id").as_uint();
+        g.standalone = el.attribute("standalone").as_bool();
+        const std::string_view view = el.attribute("view").as_string();
+        const auto* v = std::find(std::begin(view_keys), std::end(view_keys), view);
+        g.view = v == std::end(view_keys) ? GraphView::TimeSeries : static_cast<GraphView>(v - std::begin(view_keys));
+        g.duration = std::clamp(el.attribute("duration").as_int(1), 0, duration_count - 1);
+        g.columns = std::clamp(el.attribute("columns").as_int(2), 1, 4);
+        g.downsample = std::max(1, el.attribute("downsample").as_int(1));
+        g.cursor_on = el.attribute("cursors").as_bool();
+        g.cursor_a = el.attribute("cursor-a").as_double();
+        g.cursor_b = el.attribute("cursor-b").as_double();
+        g.statistics = el.attribute("statistics").as_bool();
+        int x_signal = el.attribute("x-signal").as_int();
+        int index = 0;
+        for (const pugi::xml_node se : el.children("signal"))
+        {
+            GraphSignal s;
+            if (!load_signal(setup, ifaces, se, s))
+            {
+                log_warning(std::format("Graph: signal {} {}.{} not in the setup, dropped", se.attribute("kind").as_string(),
+                                        se.attribute("message").as_string(se.attribute("iface").as_string()),
+                                        se.attribute("name").as_string()));
+                x_signal -= index < x_signal ? 1 : 0;
+                ++index;
+                continue;
+            }
+            s.color = se.attribute("color").as_uint(0xFFFFFFFF);
+            s.axis = std::clamp(se.attribute("axis").as_int(-1), -1, 4 * graph_axes_per_plot - 1);
+            s.hidden = se.attribute("hidden").as_bool();
+            g.signals.push_back(std::move(s));
+            ++index;
+        }
+        g.x_signal = std::clamp(x_signal, 0, std::max(0, static_cast<int>(g.signals.size()) - 1));
+    }
+}
+
+std::vector<int> graph_assign_slots(std::span<const GraphSignal> signals)
+{
+    // Per slot: unit and range of its first signal, and whether automatic signals may join it.
+    struct Slot
+    {
+        std::string_view unit;
+        double span = 0.0; // max - min, 0 = unknown (fits any)
+        bool automatic = false;
+        bool used = false;
+    };
+    std::vector<Slot> slot_info(4 * graph_axes_per_plot);
+    const auto span_of = [](const GraphSignal& s) { return s.max > s.min ? s.max - s.min : 0.0; };
+    // |log10| of the range ratio, 0 when either range is unknown.
+    const auto distance = [](double a, double b) { return a > 0.0 && b > 0.0 ? std::abs(std::log10(a / b)) : 0.0; };
+    std::vector<int> slots(signals.size(), -1);
+    for (std::size_t i = 0; i < signals.size(); ++i)
+    {
+        if (const auto axis = static_cast<std::size_t>(signals[i].axis); signals[i].axis >= 0 && axis < slot_info.size()
+                                                                          && !slot_info[axis].used)
+        {
+            slot_info[axis] = {signals[i].unit, span_of(signals[i]), false, true};
+        }
+        slots[i] = signals[i].axis;
+    }
+    for (std::size_t i = 0; i < signals.size(); ++i)
+    {
+        if (slots[i] >= 0)
+        {
+            continue;
+        }
+        const double span = span_of(signals[i]);
+        int best = -1;
+        for (int k = 0; k < graph_axes_per_plot && best < 0; ++k) // same unit, range within 10x
+        {
+            const Slot& sl = slot_info[static_cast<std::size_t>(k)];
+            best = sl.automatic && sl.unit == signals[i].unit && distance(sl.span, span) <= 1.0 ? k : -1;
+        }
+        for (int k = 0; k < graph_axes_per_plot && best < 0; ++k) // next free axis
+        {
+            if (!slot_info[static_cast<std::size_t>(k)].used)
+            {
+                best = k;
+                slot_info[static_cast<std::size_t>(k)] = {signals[i].unit, span, true, true};
+            }
+        }
+        if (best < 0) // Y1..Y3 all taken: nearest range
+        {
+            best = 0;
+            for (int k = 1; k < graph_axes_per_plot; ++k)
+            {
+                if (distance(slot_info[static_cast<std::size_t>(k)].span, span) < distance(slot_info[static_cast<std::size_t>(best)].span, span))
+                {
+                    best = k;
+                }
+            }
+        }
+        slots[i] = best;
+    }
+    return slots;
+}
+
+void graph_decimate(std::span<const double> t, std::span<const double> v, double x0, double x1, int buckets,
+                    std::vector<double>& out_t, std::vector<double>& out_v)
+{
+    out_t.clear();
+    out_v.clear();
+    auto lo = std::lower_bound(t.begin(), t.end(), x0);
+    auto hi = std::upper_bound(lo, t.end(), x1);
+    lo = lo == t.begin() ? lo : lo - 1; // one neighbour each side so the line reaches the edges
+    hi = hi == t.end() ? hi : hi + 1;
+    const auto i0 = static_cast<std::size_t>(lo - t.begin());
+    const auto i1 = static_cast<std::size_t>(hi - t.begin());
+    buckets = std::max(buckets, 1);
+    if (i1 - i0 <= 2 * static_cast<std::size_t>(buckets))
+    {
+        out_t.assign(t.begin() + static_cast<std::ptrdiff_t>(i0), t.begin() + static_cast<std::ptrdiff_t>(i1));
+        out_v.assign(v.begin() + static_cast<std::ptrdiff_t>(i0), v.begin() + static_cast<std::ptrdiff_t>(i1));
+        return;
+    }
+    const double w = (x1 - x0) / buckets;
+    const auto bucket = [&](double x) { return std::clamp(static_cast<long>(std::floor((x - x0) / w)), -1L, static_cast<long>(buckets)); };
+    for (std::size_t i = i0; i < i1;)
+    {
+        const long b = bucket(t[i]);
+        std::size_t mn = i;
+        std::size_t mx = i;
+        std::size_t j = i + 1;
+        for (; j < i1 && bucket(t[j]) == b; ++j)
+        {
+            mn = v[j] < v[mn] ? j : mn;
+            mx = v[j] > v[mx] ? j : mx;
+        }
+        for (std::size_t k : {std::min(mn, mx), std::max(mn, mx)})
+        {
+            out_t.push_back(t[k]);
+            out_v.push_back(v[k]);
+            if (mn == mx)
+            {
+                break;
+            }
+        }
+        i = j;
+    }
+}
+
+void graph_xy_pair(std::span<const double> x_t, std::span<const double> x_v, std::span<const double> y_t,
+                   std::span<const double> y_v, double t0, double t1, std::vector<double>& out_x,
+                   std::vector<double>& out_y)
+{
+    out_x.clear();
+    out_y.clear();
+    const auto lo = std::lower_bound(y_t.begin(), y_t.end(), t0);
+    const auto hi = std::upper_bound(lo, y_t.end(), t1);
+    // Two-pointer merge: one binary search to the window start, then xi only moves forward.
+    auto xi = lo == hi ? x_t.end() : std::upper_bound(x_t.begin(), x_t.end(), *lo);
+    for (auto it = lo; it != hi; ++it)
+    {
+        while (xi != x_t.end() && *xi <= *it) // xi = first X after this Y; the one before it holds
+        {
+            ++xi;
+        }
+        if (xi == x_t.begin())
+        {
+            continue;
+        }
+        out_x.push_back(x_v[static_cast<std::size_t>(xi - x_t.begin() - 1)]);
+        out_y.push_back(y_v[static_cast<std::size_t>(it - y_t.begin())]);
+    }
+}
+
+void graph_ingest(GraphState& g, const App& app)
+{
+    const Trace& tr = app.trace;
+    if (g.trace_clears != tr.clears)
+    {
+        g.trace_clears = tr.clears;
+        clear_samples(g);
+    }
+    if (g.setup_generation != app.setup.generation)
+    {
+        g.setup_generation = app.setup.generation;
+        resolve_signals(g, app.setup);
+    }
+    if (g.signals.empty())
+    {
+        g.next_index = tr.end;
+        return;
+    }
+    const uint64_t first = std::max(g.next_index, tr.begin);
+    if (g.start_ns < 0 && first < tr.end)
+    {
+        // t0 = earliest frame of the first batch, so no sample lands at a negative time.
+        g.start_ns = trace_at(tr, first).ts_ns;
+        for (uint64_t i = first + 1; i < tr.end; ++i)
+        {
+            g.start_ns = std::min(g.start_ns, trace_at(tr, i).ts_ns);
+        }
+    }
+    for (uint64_t i = first; i < tr.end; ++i)
+    {
+        const BusMessage& m = trace_at(tr, i);
+        const double t = static_cast<double>(m.ts_ns - g.start_ns) * 1e-9;
+        // Resolved in the DBC/LDF of m.iface's network, so a signal only takes its own
+        // network's frames (interfaces in no network search every network).
+        const CanDbMessage* can_db = setup_find_can_message(app.setup, m);
+        const LinFrame* lin_frame = setup_find_lin_frame(app.setup, m);
+        const int net = setup_network_of(app.setup, m.iface);
+        const auto in_network = [&](const GraphSignal& s)
+        { return net < 0 || app.setup.networks[static_cast<std::size_t>(net)].name == s.network; };
+        g.last_t = std::max(g.last_t, t);
+        for (auto& s : g.signals)
+        {
+            switch (s.kind)
+            {
+            case GraphSignalKind::Can:
+                if (can_db != nullptr && can_db == s.can_msg && can_signal_present(*s.can_msg, *s.can_sig, m))
+                {
+                    push_sample(s, t, can_signal_extract_physical(*s.can_sig, m));
+                }
+                break;
+            case GraphSignalKind::Lin:
+                if (lin_frame != nullptr && lin_frame->id == s.lin_id && in_network(s))
+                {
+                    const LinSignal* sig = lin_frame_find_signal(*lin_frame, s.name);
+                    if (sig != nullptr)
+                    {
+                        push_sample(s, t, lin_signal_extract_physical(*sig, {m.data.data(), m.len}));
+                    }
+                }
+                break;
+            case GraphSignalKind::BusLoad:
+                if (m.iface == s.iface)
+                {
+                    const uint32_t bits = bus_frame_bits(m);
+                    s.load_window.emplace_back(t, bits);
+                    s.load_bits += bits;
+                    sample_bus_load(s, t);
+                }
+                break;
+            }
+        }
+    }
+    if (first < tr.end)
+    {
+        g.last_wall = wall_seconds();
+    }
+    g.next_index = tr.end;
+    // A quiet bus gets no frames of its own: age the bus-load windows so the curve falls to 0.
+    if (app.measuring && g.start_ns >= 0)
+    {
+        const double now = graph_now(g, true);
+        for (auto& s : g.signals)
+        {
+            if (s.kind == GraphSignalKind::BusLoad)
+            {
+                sample_bus_load(s, now);
+            }
+        }
+    }
+}
+
+void draw_graph_windows(App& app, WorkspaceTab* current)
+{
+    const bool view = menu_take(app.menu, Command::NewGraphView);
+    const bool widget = menu_take(app.menu, Command::NewGraphWidget);
+    const bool standalone = menu_take(app.menu, Command::StandaloneGraph);
+    if (current != nullptr && (view || widget || standalone))
+    {
+        unsigned id = 1;
+        for (const auto& g : current->graphs)
+        {
+            id = std::max(id, g.id + 1);
+        }
+        GraphState& g = current->graphs.emplace_back();
+        g.id = id;
+        g.standalone = standalone;
+    }
+    for (auto& tab : app.workspace.tabs)
+    {
+        if (std::none_of(tab.graphs.begin(), tab.graphs.end(), [](const GraphState& g) { return g.id == 0; }))
+        {
+            tab.graphs.emplace(tab.graphs.begin()); // the docked default "Graph"
+        }
+        for (auto& g : tab.graphs)
+        {
+            graph_ingest(g, app);
+        }
+    }
+    const bool find = menu_take(app.menu, Command::FindSignal);
+    if (current == nullptr)
+    {
+        return;
+    }
+    for (auto& g : current->graphs)
+    {
+        draw_graph(app, *current, g);
+    }
+    GraphState& main = *std::find_if(current->graphs.begin(), current->graphs.end(), [](const GraphState& g) { return g.id == 0; });
+    if (find)
+    {
+        main.palette_query.clear();
+        ImGui::OpenPopup("Find signal");
+    }
+    draw_find_signal(app, *current, main);
+    std::erase_if(current->graphs, [](const GraphState& g) { return !g.open; });
+}

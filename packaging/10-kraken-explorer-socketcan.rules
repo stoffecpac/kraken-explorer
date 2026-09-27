@@ -1,0 +1,47 @@
+// Let members of the netdev group in an active local session run exactly the
+// `ip link` command lines Kraken Explorer issues through pkexec
+// (src/drivers/socketcan.cpp: ip_link_args, can_up_args, autobaud) without a
+// password prompt. Anything else (other ip subcommands, `ip netns exec`, `-b`
+// batch files, extra tokens) falls through to the default auth_admin.
+//
+// pkexec's "command_line" detail is the resolved program path followed by the
+// arguments, joined with single spaces.
+//
+// ES5 only: polkit's JavaScript engine (duktape / mozjs) is not guaranteed to
+// support let/const or arrow functions. All rule files share one global scope,
+// hence the KE_ prefix.
+
+var KE_IP = "(?:/usr/sbin/ip|/sbin/ip|/usr/bin/ip|/bin/ip)";
+var KE_IF = "[A-Za-z0-9_.-]{1,15}";         // IFNAMSIZ - 1
+var KE_NUM = "[0-9]{1,9}";
+var KE_SP = "[01]\\.[0-9]{3}";              // sample_point_arg: per mille as "{:.3f}"
+
+var KE_ALLOWED = [
+    // link up / down (plain, and vcan)
+    "link set " + KE_IF + " (?:up|down)",
+    // bit timing, optionally without "up" (auto-baud restore leaves the link down)
+    "link set " + KE_IF + "(?: up)? type can bitrate " + KE_NUM + " sample-point " + KE_SP +
+        "(?: dbitrate " + KE_NUM + " dsample-point " + KE_SP + " fd on)?" +
+        " listen-only (?:on|off) restart-ms " + KE_NUM,
+    // auto-baud probe
+    "link set " + KE_IF + " up type can bitrate " + KE_NUM + " listen-only on",
+    "link add dev " + KE_IF + " type vcan",
+    "link delete " + KE_IF
+];
+
+var KE_RE = new RegExp("^" + KE_IP + " (?:" + KE_ALLOWED.join("|") + ")$");
+
+function keAllowedCommandLine(cmd)
+{
+    return typeof cmd === "string" && KE_RE.test(cmd);
+}
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.policykit.exec" &&
+        subject.local && subject.active &&
+        subject.isInGroup("netdev") &&
+        keAllowedCommandLine(action.lookup("command_line")))
+    {
+        return polkit.Result.YES;
+    }
+});

@@ -1,0 +1,278 @@
+/*
+  Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
+  Copyright (c) 2026 Schildkroet
+
+  This file is part of cangaroo.
+
+  cangaroo is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 2 of the License, or
+  (at your option) any later version.
+
+  cangaroo is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "drivers/driver.h"
+
+#include <array>
+#include <format>
+#include <mutex>
+
+#include "core/log.h"
+
+extern const DriverOps socketcan_driver;
+extern const DriverOps slcan_driver;
+extern const DriverOps grip_driver;
+extern const DriverOps canblast_driver;
+extern const DriverOps linde_driver;
+#ifdef CANGAROO_KVASER
+extern const DriverOps kvaser_driver;
+#endif
+
+namespace
+{
+
+constexpr const DriverOps* drivers[] = {
+    &socketcan_driver,
+    &slcan_driver,
+    &grip_driver,
+    &canblast_driver,
+    &linde_driver,
+#ifdef CANGAROO_KVASER
+    &kvaser_driver,
+#endif
+};
+
+constexpr int listener_batch = 256;
+constexpr int listener_timeout_ms = 100; // bounds the stop latency
+
+void listen(std::stop_token stop, Iface& iface, std::span<const RxConsumer> consumers, void (*wake)())
+{
+    std::array<BusMessage, listener_batch> buf;
+    while (!stop.stop_requested())
+    {
+        const int n = iface.ops->read(iface, buf.data(), listener_batch, listener_timeout_ms);
+        if (n < 0)
+        {
+            log_error(std::format("Error on interface: {}, closed", iface.info.name));
+            iface.failed = true;
+            return;
+        }
+        if (n == 0)
+        {
+            continue;
+        }
+        const std::span<const BusMessage> msgs(buf.data(), static_cast<std::size_t>(n));
+        uint64_t bits = 0;
+        for (const auto& m : msgs)
+        {
+            bits += bus_frame_bits(m);
+        }
+        iface.total_bits.fetch_add(bits, std::memory_order_relaxed);
+        rx_deliver(iface.inbox, consumers, msgs, wake);
+    }
+}
+
+} // namespace
+
+const char* iface_state_name(IfaceState s) noexcept
+{
+    switch (s)
+    {
+    case IfaceState::Ok:
+        return "ok";
+    case IfaceState::Warning:
+        return "warning";
+    case IfaceState::Passive:
+        return "error passive";
+    case IfaceState::BusOff:
+        return "bus off";
+    case IfaceState::Stopped:
+        return "stopped";
+    case IfaceState::Unknown:
+        break;
+    }
+    return "unknown";
+}
+
+std::span<const DriverOps* const> all_drivers() noexcept
+{
+    return drivers;
+}
+
+uint32_t bus_frame_bits(const BusMessage& m) noexcept
+{
+    if (m.type == BusType::LIN)
+    {
+        // Break(14) + Sync(10) + PID(10) + data bytes (10 each) + checksum(10)
+        return 44 + static_cast<uint32_t>(m.len) * 10;
+    }
+    uint32_t bits = 47 + static_cast<uint32_t>(m.len) * 8;
+    if (has_flag(m, bus_flag::extended))
+    {
+        bits += 18 + 2;
+    }
+    if (has_flag(m, bus_flag::fd))
+    {
+        bits += 20;
+    }
+    return bits + bits / 5; // approximate bit stuffing
+}
+
+int ifaces_find(const std::deque<Iface>& ifaces, std::string_view driver, std::string_view name)
+{
+    for (std::size_t i = 0; i < ifaces.size(); ++i)
+    {
+        if (ifaces[i].ops->name == driver && ifaces[i].info.name == name)
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void ifaces_enumerate(std::deque<Iface>& ifaces)
+{
+    std::vector<IfaceInfo> found;
+    for (const DriverOps* ops : all_drivers())
+    {
+        found.clear();
+        ops->enumerate(found);
+        for (auto& info : found)
+        {
+            const int idx = ifaces_find(ifaces, ops->name, info.name);
+            if (idx >= 0)
+            {
+                ifaces[static_cast<std::size_t>(idx)].info = std::move(info);
+                continue;
+            }
+            // channels that disappeared stay listed, so BusMessage::iface never dangles
+            auto& i = ifaces.emplace_back();
+            i.ops = ops;
+            i.info = std::move(info);
+            i.index = static_cast<uint16_t>(ifaces.size() - 1);
+        }
+    }
+}
+
+void ifaces_default_setup(const std::deque<Iface>& ifaces, Setup& setup)
+{
+    setup.networks.clear();
+    for (const auto& i : ifaces)
+    {
+        if (!i.info.up)
+        {
+            continue; // a down can0 would only fail at Start (and ask pkexec to bring it up)
+        }
+        setup.networks.push_back({
+            .name = std::format("Network {}", setup.networks.size() + 1),
+            .interfaces = {{.driver = i.ops->name, .name = i.info.name, .bus_type = i.info.bus_type}},
+        });
+    }
+    setup_rebuild_cache(setup);
+}
+
+int ifaces_start(std::deque<Iface>& ifaces, Setup& setup, std::span<const RxConsumer> consumers, void (*wake)())
+{
+    int opened = 0;
+    for (auto& network : setup.networks)
+    {
+        for (auto& si : network.interfaces)
+        {
+            si.iface = ifaces_find(ifaces, si.driver, si.name);
+            if (si.iface < 0)
+            {
+                log_warning(std::format("Interface {}/{} not found, not listening on it", si.driver, si.name));
+                continue;
+            }
+            auto& iface = ifaces[static_cast<std::size_t>(si.iface)];
+            if (!si.enabled || iface.listener.joinable())
+            {
+                continue;
+            }
+            {
+                std::unique_lock lock(iface.io_mutex);
+                iface.open = iface.ops->open(iface, si);
+                if (!iface.open)
+                {
+                    log_error(std::format("Could not open interface {}", iface.info.name));
+                    iface.failed = true; // not running: the status pill must not count it as up
+                    continue;
+                }
+            }
+            iface.failed = false;
+            iface.total_bits = 0;
+            log_info(std::format("Listening on interface #{}: {}, version: {}", iface.index, iface.info.name,
+                                 iface.info.version));
+            iface.listener = std::jthread(listen, std::ref(iface), consumers, wake);
+            ++opened;
+        }
+    }
+    return opened;
+}
+
+LinkCount ifaces_link_count(const std::deque<Iface>& ifaces, const Setup& setup)
+{
+    LinkCount c;
+    for (const auto& network : setup.networks)
+    {
+        for (const auto& si : network.interfaces)
+        {
+            if (!si.enabled)
+            {
+                continue;
+            }
+            ++c.total;
+            if (si.iface >= 0 && static_cast<std::size_t>(si.iface) < ifaces.size())
+            {
+                const auto& iface = ifaces[static_cast<std::size_t>(si.iface)];
+                c.up += iface.open && !iface.failed.load() ? 1 : 0;
+            }
+        }
+    }
+    return c;
+}
+
+void ifaces_stop(std::deque<Iface>& ifaces)
+{
+    for (auto& i : ifaces)
+    {
+        i.listener.request_stop();
+    }
+    for (auto& i : ifaces)
+    {
+        if (!i.listener.joinable())
+        {
+            continue;
+        }
+        i.listener.join();
+        log_info(std::format("Closing interface: {}", i.info.name));
+        std::unique_lock lock(i.io_mutex);
+        i.ops->close(i);
+        i.impl.reset();
+        i.open = false;
+    }
+}
+
+bool iface_send(Iface& iface, const BusMessage& msg)
+{
+    std::shared_lock lock(iface.io_mutex);
+    return iface.open && iface.ops->send(iface, msg);
+}
+
+bool iface_stats(Iface& iface, IfaceStats& out)
+{
+    std::shared_lock lock(iface.io_mutex);
+    if (!iface.open || !iface.ops->stats)
+    {
+        return false;
+    }
+    iface.ops->stats(iface, out);
+    return true;
+}
