@@ -7,8 +7,13 @@
 #include <chrono>
 #include <cstring>
 
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <pugixml.hpp>
+
 #include "app.h"
 #include "ui/gateway.h"
+#include "ui_test.h"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -48,6 +53,20 @@ TEST_CASE("gateway_rule_problem: same/missing interface, reverse of an existing 
     CHECK(gateway_rule_problem(gw, 1, 1) == GatewayRuleProblem::SameInterface);
 }
 
+TEST_CASE("rule row edit refuses source == destination (T87b a2 F5: frames echoed onto their own bus)")
+{
+    Gateway gw;
+    gw.rules.push_back({.id = 1, .src = 0, .dst = 1});
+    CHECK_FALSE(gateway_rule_reroute(gw, 0, 1, 1));
+    CHECK_FALSE(gateway_rule_reroute(gw, 0, UINT16_MAX, 1));
+    CHECK_FALSE(gateway_rule_reroute(gw, 1, 2, 3)); // no such rule
+    CHECK(gw.rules[0].src == 0);
+    CHECK(gw.rules[0].dst == 1);
+    CHECK(gateway_rule_reroute(gw, 0, 2, 1));
+    CHECK(gw.rules[0].src == 2);
+    CHECK(gw.rules[0].dst == 1);
+}
+
 TEST_CASE("disabled gateway forwards nothing")
 {
     std::deque<Iface> ifaces(2);
@@ -60,6 +79,95 @@ TEST_CASE("disabled gateway forwards nothing")
     gw.enabled = true;
     gateway_rx_consumer(&gw, BusMessage{.id = 1});
     CHECK(gw.failed == 1); // destination closed
+}
+
+TEST_CASE("workspace XML: rules by driver + interface name and the enabled state survive a reorder (T87c)")
+{
+    static const DriverOps sc{.name = "SocketCAN"};
+    const auto make = [](std::initializer_list<const char*> names)
+    {
+        std::deque<Iface> ifaces(names.size());
+        uint16_t n = 0;
+        for (const char* name : names)
+        {
+            ifaces[n].ops = &sc;
+            ifaces[n].index = n;
+            ifaces[n++].info.name = name;
+        }
+        return ifaces;
+    };
+    const std::deque<Iface> saved = make({"vcan0", "vcan1", "vcan2", "vcan3"});
+    Gateway a;
+    a.enabled = true;
+    a.rules = {{.id = 0x123, .name = "Ping", .src = 0, .dst = 1},
+               {.id = 0x18FEEE00, .extended = true, .src = 2, .dst = 0},
+               {.id = 0x7, .src = 3, .dst = 0}}; // vcan3 is gone at load
+    pugi::xml_document doc;
+    pugi::xml_node root = doc.append_child("kraken-workspace");
+    gateway_save_xml(a, saved, root);
+
+    const std::deque<Iface> now = make({"vcan2", "vcan0", "vcan1"});
+    Gateway b;
+    gateway_load_xml(b, now, root);
+    CHECK(b.enabled);
+    REQUIRE(b.rules.size() == 2);
+    CHECK(b.rules[0].id == 0x123);
+    CHECK(b.rules[0].name == "Ping");
+    CHECK_FALSE(b.rules[0].extended);
+    CHECK(b.rules[0].src == 1); // vcan0
+    CHECK(b.rules[0].dst == 2); // vcan1
+    CHECK(b.rules[1].id == 0x18FEEE00);
+    CHECK(b.rules[1].extended);
+    CHECK(b.rules[1].src == 0); // vcan2
+    CHECK(b.rules[1].dst == 1);
+
+    // A workspace without <gateway> clears the rules; nothing to keep writes no element.
+    gateway_load_xml(b, now, pugi::xml_document().append_child("kraken-workspace"));
+    CHECK(b.rules.empty());
+    CHECK_FALSE(b.enabled);
+    pugi::xml_document empty;
+    gateway_save_xml(b, now, empty.append_child("kraken-workspace"));
+    CHECK_FALSE(empty.first_child().child("gateway"));
+}
+
+TEST_CASE("a disabled gateway's rules can still be removed; enabling resets the counters (T87c)")
+{
+    UiTest ctx;
+    App app;
+    Gateway& gw = app.gateway;
+    gw.open = true;
+    gw.rules.push_back({.id = 1, .src = 0, .dst = 1});
+    gw.selected = 0;
+    gw.forwarded = 5;
+    gw.failed = 2;
+    ImGuiID remove = 0;
+    ImGuiID enable = 0;
+    const auto draw = [&]
+    {
+        ImGui::NewFrame();
+        draw_gateway(app, gw);
+        ImGui::Begin("CAN Gateway");
+        remove = ImGui::GetID("Remove");
+        enable = ImGui::GetID("Enable Gateway");
+        ImGui::End();
+        ImGui::EndFrame();
+    };
+    draw();
+    ImGui::ActivateItemByID(remove);
+    for (int i = 0; i < 3; ++i)
+    {
+        draw();
+    }
+    CHECK(gw.rules.empty());
+    CHECK_FALSE(gw.enabled);
+    ImGui::ActivateItemByID(enable);
+    for (int i = 0; i < 3; ++i)
+    {
+        draw();
+    }
+    CHECK(gw.enabled);
+    CHECK(gw.forwarded == 0);
+    CHECK(gw.failed == 0);
 }
 
 namespace
@@ -91,6 +199,7 @@ TEST_CASE("forwards vcan0 -> vcan1")
         ifaces[n].ops = &socketcan_driver;
         ifaces[n].index = n;
         ifaces[n].info.name = n == 0 ? "vcan0" : "vcan1";
+        ifaces[n].info.details = "vcan"; // as enumerate: never `ip link set` (pkexec) the shared vcan
     }
     Setup setup;
     setup.networks.push_back({.interfaces = {{.driver = "SocketCAN", .name = "vcan0"}, {.driver = "SocketCAN", .name = "vcan1"}}});

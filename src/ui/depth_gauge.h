@@ -15,7 +15,10 @@ inline constexpr float dial_span = 1.5f * std::numbers::pi_v<float>;
 void dial_face(ImDrawList* dl, ImVec2 c, float r);
 // Ticks end at r * outer; major ones every fifth tick.
 void dial_ticks(ImDrawList* dl, ImVec2 c, float r, float outer);
+// Porthole ring; bolts from thickness 4 px.
 void dial_bezel(ImDrawList* dl, ImVec2 c, float r, float thickness);
+// Tapered needle from the centre to radius r at `angle`, with a short counterweight.
+void dial_needle(ImDrawList* dl, ImVec2 c, float r, float angle, ImU32 col);
 
 // "Depth Gauge": progress as a dive into the Mariana Trench, 0 m to Challenger Deep (100 %).
 inline constexpr float challenger_deep_m = 10994.0f;

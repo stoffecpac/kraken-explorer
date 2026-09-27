@@ -6,7 +6,7 @@
  * Keep in sync with Core/Inc/aio_usb.h on the firmware side.
  *
  * This file exists twice, byte-for-byte identical:
- *   src/driver/AiodeDriver/aio_usb_protocol.h                     (cangaroo host)
+ *   src/drivers/aiode/aio_usb_protocol.h                          (Kraken Explorer host)
  *   firmware/STM32G4_TinyUSB_CanLinAio/SampleApp/aio_usb_protocol.h  (libusb sample)
  * Edit one, copy it over the other -- a silent divergence here is a
  * host/device protocol mismatch.

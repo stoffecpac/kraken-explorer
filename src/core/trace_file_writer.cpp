@@ -2,20 +2,20 @@
   Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "trace_file_writer.h"
@@ -174,8 +174,8 @@ void write_vector_mdf(std::ostream& out, std::span<const BusMessage> messages)
 
     // The file history comment must be an MDBLOCK with <FHcomment>.
     const std::string fh_comment =
-        std::string("<FHcomment xmlns=\"http://www.asam.net/mdf/v4\"><TX>CANgaroo trace export</TX>"
-                    "<tool_id>CANgaroo</tool_id><tool_vendor>CANgaroo</tool_vendor><tool_version>")
+        std::string("<FHcomment xmlns=\"http://www.asam.net/mdf/v4\"><TX>Kraken Explorer trace export</TX>"
+                    "<tool_id>Kraken Explorer</tool_id><tool_vendor>Kraken Explorer</tool_vendor><tool_version>")
         + VERSION_STRING + "</tool_version></FHcomment>";
     constexpr std::string_view acquisition_name = "CAN";
 
@@ -227,7 +227,7 @@ void write_vector_mdf(std::ostream& out, std::span<const BusMessage> messages)
     // ===== IDBLOCK (no common header) =====
     append_raw(b, "MDF     ");
     append_raw(b, "4.10    ");
-    append_raw(b, "CANgaroo");
+    append_raw(b, "Kraken  ");  // id_prog: 8 chars, space padded
     zeros(4);                        // id_reserved1
     append_le(b, uint16_t{410});     // id_ver
     zeros(30);                       // id_reserved2

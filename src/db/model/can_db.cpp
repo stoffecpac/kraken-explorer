@@ -3,28 +3,31 @@
   Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
 #include "can_db.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstdio>
+#include <format>
 
 CanDbMessage* can_db_find_message(CanDb& db, uint32_t raw_id)
 {
@@ -167,4 +170,50 @@ bool can_signal_present(const CanDbMessage& msg, const CanDbSignal& sig, const B
     }
     const CanDbSignal* muxer = can_db_muxer(msg);
     return muxer && sig.mux_value == can_signal_extract_raw(*muxer, m);
+}
+
+namespace
+{
+
+// Decimal places of x, up to 9 (0.0057 -> 4, 1e-07 -> 7, 2 -> 0).
+int decimals_of(double x)
+{
+    double p = 1.0;
+    for (int d = 0; d < 9; ++d, p *= 10.0)
+    {
+        const double r = std::round(x * p);
+        if ((r != 0.0 || x == 0.0) && std::abs(x * p - r) < 1e-6)
+        {
+            return d;
+        }
+    }
+    return 9;
+}
+
+} // namespace
+
+std::string can_signal_printf(const CanDbSignal& sig)
+{
+    switch (sig.value_type)
+    {
+    case SignalValueType::float32:
+        return "%.7g";
+    case SignalValueType::float64:
+        return "%.15g";
+    case SignalValueType::integer:
+        break;
+    }
+    return std::format("%.{}f", std::max(decimals_of(sig.factor), decimals_of(sig.offset)));
+}
+
+std::string can_signal_format(const CanDbSignal& sig, double v)
+{
+    std::array<char, 64> buf{};
+    std::snprintf(buf.data(), buf.size(), can_signal_printf(sig).c_str(), v);
+    std::string out = buf.data();
+    if (out.starts_with('-') && out.find_first_not_of("-0.") == std::string::npos)
+    {
+        out.erase(0, 1);
+    }
+    return out;
 }

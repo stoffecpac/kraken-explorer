@@ -1,5 +1,5 @@
 // ui/replay: trace file parsing (vectors written by hand from the candump, Vector ASC,
-// pcap and pcapng formats, not from cangaroo's writers), the filter/plan, and playback
+// pcap and pcapng formats, not from Kraken Explorer's writers), the filter/plan, and playback
 // on vcan0 with the original timing (skipped when vcan0 is not up).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -15,8 +15,13 @@
 #include <thread>
 #include <vector>
 
+#include <imgui.h>
+#include <imgui_internal.h>
+
 #include "app.h"
 #include "ui/replay.h"
+#include "ui/workspace_tabs.h"
+#include "ui_test.h"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -252,6 +257,7 @@ TEST_CASE("replay a candump file onto vcan0 with its timing")
     auto& i = ifaces.emplace_back();
     i.ops = &socketcan_driver;
     i.info.name = "vcan0";
+    i.info.details = "vcan"; // as enumerate: never `ip link set` (pkexec) the shared vcan
     Setup setup;
     setup.networks.push_back({.interfaces = {{.driver = "SocketCAN", .name = "vcan0"}}});
     REQUIRE(ifaces_start(ifaces, setup, {}, nullptr) == 1);
@@ -436,4 +442,69 @@ TEST_CASE("replay_load: cancel, restart and destroy mid-load leave no threads")
     CHECK(missing.data.info == "Error: Cannot open file.");
     CHECK(missing.data.path.empty());
     std::filesystem::remove(path);
+}
+
+TEST_CASE("closing the Replay window stops the playback (T87b a3 F4)")
+{
+    App app;
+    app.workspace.tabs.push_back({.uid = 7});
+    Replay r;
+    r.data.file = replay_parse("(0.0) x 1#01\n(60.0) x 1#02\n", TraceFileFormat::CanDump);
+    r.data.rows = replay_id_rows(r.data.file);
+    r.mapping = {replay_trace_only};
+    replay_start(r, app.ifaces, app.tasks);
+    REQUIRE(r.running);
+    r.open = false; // the window's X
+    draw_replay(app, app.workspace.tabs[0], r);
+    CHECK_FALSE(r.running);
+    CHECK_FALSE(r.player.joinable());
+}
+
+namespace
+{
+
+void replay_frame(App& app, Replay& r)
+{
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize({900, 600});
+    draw_replay(app, app.workspace.tabs[0], r);
+    ImGui::EndFrame();
+}
+
+} // namespace
+
+TEST_CASE("the channel checkbox in the filter table takes the click, not the tree node (T87b a3 F5)")
+{
+    UiTest ctx({1000, 700});
+    App app;
+    app.workspace.tabs.push_back({.uid = 8});
+    Replay r;
+    r.open = true;
+    r.data.file = replay_parse("(0.0) a 100#01\n(0.1) a 200#02\n", TraceFileFormat::CanDump);
+    r.data.rows = replay_id_rows(r.data.file);
+    r.data.channel_lin = {0};
+    r.mapping = {replay_trace_only};
+    REQUIRE(r.data.rows.size() == 2);
+    REQUIRE(r.data.rows[0].rx_on);
+    replay_frame(app, r);
+    replay_frame(app, r);
+    ImGuiWindow* w = ImGui::FindWindowByName(workspace_window_name(app.workspace.tabs[0], "Replay").c_str());
+    REQUIRE(w != nullptr);
+    ImGuiTable* t = ImGui::TableFindByID(w->GetID("##filter"));
+    REQUIRE(t != nullptr);
+    const ImGuiStyle& st = ImGui::GetStyle();
+    // On the label of the channel checkbox ("a (CAN)"), right of the tree arrow, in the first body row.
+    const ImVec2 at{t->Columns[0].MinX + st.CellPadding.x + ImGui::GetTreeNodeToLabelSpacing() + st.ItemSpacing.x
+                        + ImGui::GetFrameHeight() + 12.0f,
+                    t->OuterRect.Min.y + ImGui::GetTextLineHeight() + st.CellPadding.y * 3.0f + ImGui::GetFrameHeight() * 0.5f};
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(at.x, at.y);
+    replay_frame(app, r);
+    io.AddMouseButtonEvent(0, true);
+    replay_frame(app, r);
+    io.AddMouseButtonEvent(0, false);
+    replay_frame(app, r);
+    CHECK_FALSE(r.data.rows[0].rx_on); // unticked the whole channel
+    CHECK_FALSE(r.data.rows[1].rx_on);
 }

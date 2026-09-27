@@ -543,6 +543,16 @@ fs::path file_dialog_save_path(const fs::path& dir, const std::string& name, std
     return p;
 }
 
+std::string file_dialog_retype(const std::string& name, std::string_view patterns)
+{
+    if (name.empty())
+    {
+        return name;
+    }
+    const fs::path typed = file_dialog_save_path({}, fs::path(name).replace_extension().string(), patterns);
+    return typed.has_extension() ? typed.string() : name;
+}
+
 void file_dialog_open(FileDialog& d, FileDialogMode mode, std::string title, const std::string& start_path,
                       std::vector<FileFilter> filters)
 {
@@ -671,6 +681,11 @@ std::vector<std::string> file_dialog_draw(FileDialog& d)
                 {
                     d.filter = i;
                     d.selected.clear();
+                    if (d.mode == FileDialogMode::Save) // the type picks the format: trace.asc -> trace.pcapng
+                    {
+                        d.file_name = file_dialog_retype(d.file_name, d.filters[static_cast<std::size_t>(i)].patterns);
+                        d.confirm_path.clear();
+                    }
                 }
             }
             ImGui::EndCombo();

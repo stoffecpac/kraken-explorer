@@ -2,20 +2,20 @@
 
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -79,7 +79,7 @@ struct TempDir
     TempDir()
     {
         std::random_device rd;
-        path = fs::temp_directory_path() / std::format("cangaroo_rec_{:08x}{:08x}", rd(), rd());
+        path = fs::temp_directory_path() / std::format("kraken_rec_{:08x}{:08x}", rd(), rd());
         fs::create_directories(path);
     }
     ~TempDir()
@@ -444,8 +444,10 @@ TEST_CASE("unsupported format disarms")
     CHECK(files_in(dir.path).empty());
 }
 
-// RX threads of several interfaces queue interleaved; a later batch can even hold an older frame.
-TEST_CASE("ASC recording of unsorted frames is time-ordered per batch, never negative")
+// RX threads of several interfaces queue interleaved and a little late relative to each other
+// (up to 1.66 ms seen, T87b a1 F6): a later drain batch can hold an older frame. The drain keeps
+// the newest Recorder::reorder_window queued, so the file stays in time order.
+TEST_CASE("ASC recording of frames queued out of order across drains is time-ordered")
 {
     TempDir dir;
     Recorder r;
@@ -455,18 +457,21 @@ TEST_CASE("ASC recording of unsorted frames is time-ordered per batch, never neg
     {
         recorder_enqueue(r, bulk_frame(i));
     }
-    recorder_drain(r);
-    recorder_enqueue(r, bulk_frame(0)); // 1 ms older than the file's first frame
-    recorder_set_armed(r, false, true);
+    recorder_drain(r);                    // all within 50 ms of the newest: nothing written yet
+    recorder_enqueue(r, bulk_frame(0));   // 1 ms older than everything queued so far
+    recorder_enqueue(r, bulk_frame(100));
+    recorder_drain(r);                    // 0..3 ms are older than 100 - 50 ms: written, sorted
+    CHECK(r.frames_written == 4);
+    recorder_set_armed(r, false, true);   // the end of the recording flushes the rest
 
     const auto files = files_in(dir.path);
     REQUIRE(files.size() == 1);
     const auto lines = lines_of(read_all(files[0]));
-    REQUIRE(asc_frames(read_all(files[0])) == 4);
+    REQUIRE(asc_frames(read_all(files[0])) == 5);
     std::vector<std::string> times;
     for (std::size_t i = 6; i < lines.size() - 1; ++i)
     {
         times.push_back(trimmed(lines[i]).substr(0, trimmed(lines[i]).find(' ')));
     }
-    CHECK(times == std::vector<std::string>{"0.000000", "0.001000", "0.002000", "0.000000"});
+    CHECK(times == std::vector<std::string>{"0.000000", "0.001000", "0.002000", "0.003000", "0.100000"});
 }

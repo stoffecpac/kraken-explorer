@@ -9,6 +9,7 @@
 
 #include "app.h"
 #include "db/model/can_db.h"
+#include "ui/tx_generator.h"
 
 namespace
 {
@@ -100,7 +101,11 @@ bool draw_raw_tx(App& app, BusMessage& msg, const CanDbMessage* db)
         ImGui::EndCombo();
     }
     ImGui::SameLine();
+    // An id above 0x7FF only exists as extended: unticking would send a different (masked) id.
+    ImGui::BeginDisabled(msg.id > can_id_mask_standard);
     changed |= flag_checkbox("Extended", msg, bus_flag::extended);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Ids above 7FF are always extended");
     ImGui::SameLine();
     const bool fd = has_flag(msg, bus_flag::fd);
     ImGui::BeginDisabled(fd);
@@ -184,9 +189,9 @@ bool draw_raw_tx(App& app, BusMessage& msg, const CanDbMessage* db)
                 ImGui::TableNextColumn();
                 double value = can_signal_extract_physical(sig, msg);
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::InputDouble("##v", &value, 0.0, 0.0, "%.2f"))
+                if (ImGui::InputDouble("##v", &value, 0.0, 0.0, can_signal_printf(sig).c_str())) // 1e-07 scales stay visible
                 {
-                    can_signal_inject_physical(sig, msg, value);
+                    tx_signal_set(sig, msg, value); // clamped to the DBC range, as the Generator row editor
                     changed = true;
                 }
                 ImGui::TableNextColumn();

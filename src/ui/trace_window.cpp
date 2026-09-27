@@ -10,12 +10,14 @@
 #include <imgui.h>
 #include <imgui_internal.h> // TableFindByID: last frame's column state for the ScrollX fallback
 #include <misc/cpp/imgui_stdlib.h>
+#include <pugixml.hpp>
 
 #include "app.h"
 #include "core/setup.h"
 #include "core/text.h"
 #include "db/model/can_db.h"
 #include "db/model/lin_db.h"
+#include "drivers/driver.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
 #include "ui/vim_nav.h"
@@ -276,12 +278,12 @@ bool dialog_accepts(const TraceFilter& f, const BusMessage& m)
     return !f.hidden_ifaces.contains(m.iface);
 }
 
-// Columns the old TraceFilterModel searched: ID, name, channel, sender, type.
-bool text_matches(const App& app, std::string_view text, const BusMessage& m)
+// Columns the old TraceFilterModel searched: ID (as shown: hex or decimal), name, channel, sender, type.
+bool text_matches(const App& app, std::string_view text, const BusMessage& m, bool decimal)
 {
     static std::string buf; // main thread only
     buf.clear();
-    append_frame_id(buf, m);
+    trace_append_id(buf, m, decimal);
     buf += '\n';
     append_type(buf, m);
     const DbText db = db_text(app, m);
@@ -297,7 +299,7 @@ bool proto_accepts(const TraceWindowState& s, const App& app, const ProtocolMess
     }
     const BusMessage& f = pm.raw_frames.front();
     return dialog_accepts(s.filter, f)
-           && (s.filter.text.empty() || icontains(pm.name, s.filter.text) || text_matches(app, s.filter.text, f));
+           && (s.filter.text.empty() || icontains(pm.name, s.filter.text) || text_matches(app, s.filter.text, f, s.decimal));
 }
 
 // --- model update -------------------------------------------------------------------------
@@ -380,7 +382,7 @@ void process_frame(TraceWindowState& s, const App& app, uint64_t index)
         row.prev = row.last;
         row.last = m;
         row.has_prev = true;
-        if (m.ts_ns >= row.prev.ts_ns)
+        if (m.ts_ns >= row.prev.ts_ns && (row.prev.ts_ns >= s.cycle_cut_ns || m.ts_ns < s.cycle_cut_ns)) // not across a stop
         {
             cycle_stats_add(row.cycle, m.ts_ns - row.prev.ts_ns);
         }
@@ -447,7 +449,7 @@ double cycle_stats_median(const CycleStats& c)
 
 bool trace_filter_accepts(const TraceWindowState& s, const App& app, const BusMessage& m)
 {
-    return dialog_accepts(s.filter, m) && (s.filter.text.empty() || text_matches(app, s.filter.text, m));
+    return dialog_accepts(s.filter, m) && (s.filter.text.empty() || text_matches(app, s.filter.text, m, s.decimal));
 }
 
 std::vector<uint16_t> trace_filter_ifaces(const TraceWindowState& s, const App& app)
@@ -499,6 +501,15 @@ void trace_window_update(TraceWindowState& s, const App& app)
         s.clears = t.clears;
         reset_views(s, t.begin);
     }
+    if (s.was_measuring && !app.measuring)
+    {
+        // Every frame of the stopped measurement is in the trace by now (stop joins the RX threads).
+        // ponytail: a stop and restart while this window is not drawn (its tab hidden) is not seen;
+        // a measurement counter in App would catch that too.
+        s.cycle_cut_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    s.was_measuring = app.measuring;
     if (s.processed < t.begin)
     {
         s.processed = t.begin; // pruned before this window saw it (e.g. its tab was hidden)
@@ -559,10 +570,12 @@ Colors theme_colors()
     const ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
     const bool dark = bg.x + bg.y + bg.z < 1.5f;
     const auto rgb = [](unsigned hex) { return ImGui::ColorConvertU32ToFloat4(theme_u32(hex)); };
+    // faded = the theme's hint colour (>= 4.5:1); changed bytes >= 4.5:1 on the alternate row too.
+    const ImVec4 faded = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
     return dark ? Colors{ImGui::GetStyleColorVec4(ImGuiCol_Text), rgb(0xff6464), rgb(0xd27800),
-                         rgb(0x646464), rgb(0x64b4ff), rgb(0x78ff78), rgb(0xff7878)}
-                : Colors{ImGui::GetStyleColorVec4(ImGuiCol_Text), rgb(0xff0000), rgb(0xb45a00),
-                         rgb(0xc8c8c8), rgb(0x00008b), rgb(0x006400), rgb(0x8b0000)};
+                         faded, rgb(0x64b4ff), rgb(0x78ff78), rgb(0xff7878)}
+                : Colors{ImGui::GetStyleColorVec4(ImGuiCol_Text), rgb(0xff0000), rgb(0x9a4c00),
+                         faded, rgb(0x00008b), rgb(0x006400), rgb(0x8b0000)};
 }
 
 enum class Align
@@ -597,7 +610,7 @@ void yank_cell(std::string_view text)
 {
     if (g_yank != nullptr)
     {
-        if (!g_yank->empty())
+        if (!g_yank->empty() && g_yank->back() != '\n')
         {
             *g_yank += '\t';
         }
@@ -727,9 +740,9 @@ void frame_cells(Ctx& c, const BusMessage& m, int64_t prev_ts, const BusMessage*
     std::format_to(std::back_inserter(b), "{}", m.len);
     cell(col_dlc, b);
     b.clear();
-    if (c.s.decimal)
+    if (c.s.decimal || has_flag(m, bus_flag::rtr))
     {
-        trace_append_data(b, m, true);
+        trace_append_data(b, m, true); // an RTR's DLC is only the requested length: no bytes
     }
     else
     {
@@ -868,12 +881,37 @@ void table_nav(Ctx& c, int count, bool rolling)
     }
 }
 
+// 'y' capture of row r. Call before its first cell: the selected row's cells (and child rows) are
+// all drawn once the next row starts.
+void yank_row(Ctx& c, int r)
+{
+    if (r != c.s.selected)
+    {
+        yank_finish(c);
+        return;
+    }
+    if (c.s.yank_pending)
+    {
+        c.yank_line.clear();
+        g_yank = &c.yank_line;
+    }
+}
+
+// A child row (signal, metadata, raw frame) under the row being captured: its own line.
+void child_row()
+{
+    ImGui::TableNextRow();
+    if (g_yank != nullptr)
+    {
+        *g_yank += '\n';
+    }
+}
+
 // Highlights row r when selected and scrolls to it after a move. Call after its first cell.
 void nav_row(Ctx& c, int r)
 {
     if (r != c.s.selected)
     {
-        yank_finish(c); // the selected row's cells are all drawn once the next row starts
         return;
     }
     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(ImGuiCol_Header));
@@ -881,11 +919,6 @@ void nav_row(Ctx& c, int r)
     {
         ImGui::SetScrollHereY();
         c.s.nav_scroll = false;
-    }
-    if (c.s.yank_pending)
-    {
-        c.yank_line.clear();
-        g_yank = &c.yank_line;
     }
 }
 
@@ -933,7 +966,7 @@ void signal_rows(Ctx& c, const BusMessage& m, float alpha)
         }
         for (const LinSignal& sig : f->signals)
         {
-            ImGui::TableNextRow();
+            child_row();
             cell(col_name, sig.name);
             const uint64_t raw = lin_signal_extract_raw(sig, std::span(m.data.data(), m.len));
             b.clear();
@@ -950,7 +983,7 @@ void signal_rows(Ctx& c, const BusMessage& m, float alpha)
     }
     for (const CanDbSignal& sig : d->signals)
     {
-        ImGui::TableNextRow();
+        child_row();
         // ponytail: muxed-out signals are left blank; the old mux cache (last value per mux) is not ported. Port it if blanks are a complaint.
         const bool present = can_signal_present(*d, sig, m);
         ImVec4 faded = c.colors.faded;
@@ -998,6 +1031,7 @@ bool tree_index_cell(Ctx& c, uint64_t n, bool has_children, const void* id)
     ImGui::TableSetColumnIndex(col_index);
     c.buf.clear();
     std::format_to(std::back_inserter(c.buf), "{}", n);
+    yank_cell(c.buf);
     return ImGui::TreeNodeEx(id, ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_NoTreePushOnOpen, "%s",
                              c.buf.c_str());
 }
@@ -1082,7 +1116,7 @@ void draw_monitor_aggregated(Ctx& c, float px)
         if (c.app.measuring)
         {
             const double age = static_cast<double>(c.now_ns - row.last.ts_ns) / 1e9;
-            alpha = static_cast<float>(std::clamp(255.0 - age * 58.0, 80.0, 255.0) / 255.0);
+            alpha = static_cast<float>(std::clamp(255.0 - age * 58.0, 160.0, 255.0) / 255.0); // stale rows stay readable
         }
         ImGui::TableNextRow();
         push_row_color(c, row.last, alpha);
@@ -1091,6 +1125,7 @@ void draw_monitor_aggregated(Ctx& c, float px)
         const float y = ImGui::GetCursorScreenPos().y;
         const bool visible = y + ImGui::GetTextLineHeightWithSpacing() >= ImGui::GetWindowPos().y
                              && y <= ImGui::GetWindowPos().y + ImGui::GetWindowHeight();
+        yank_row(c, r);
         const bool open = tree_index_cell(c, row.order, has_signals(c.app, row.last), &row);
         nav_row(c, r);
         // Off-screen rows keep only their index cell (one line, so the scroll height stays right):
@@ -1135,6 +1170,7 @@ void draw_monitor_rolling(Ctx& c, float px)
             const BusMessage* prev = row.prev != UINT64_MAX && row.prev >= t.begin ? &trace_at(t, row.prev) : nullptr;
             ImGui::TableNextRow();
             push_row_color(c, m, 1.0f);
+            yank_row(c, r);
             index_cell(c, row.index - s.index_base + 1);
             nav_row(c, r);
             frame_cells(c, m, prev != nullptr ? prev->ts_ns : 0, prev, 1.0f);
@@ -1249,6 +1285,7 @@ void draw_proto_rolling(Ctx& c, ProtoView& v, float px)
             const ProtoRow& row = v.rolling[v.visible[static_cast<std::size_t>(r)]];
             ImGui::TableNextRow();
             ImGui::PushStyleColor(ImGuiCol_Text, proto_color(c, row.msg));
+            yank_row(c, r);
             index_cell(c, row.order);
             nav_row(c, r);
             proto_cells(c, row);
@@ -1280,6 +1317,7 @@ void draw_proto_aggregated(Ctx& c, ProtoView& v, float px)
         ImGui::TableNextRow();
         ImGui::PushID(static_cast<int>(i));
         ImGui::PushStyleColor(ImGuiCol_Text, proto_color(c, pm));
+        yank_row(c, shown);
         const bool open = tree_index_cell(c, row.order, !pm.metadata.empty() || !pm.raw_frames.empty(), &row);
         nav_row(c, shown++);
         proto_cells(c, row);
@@ -1288,7 +1326,7 @@ void draw_proto_aggregated(Ctx& c, ProtoView& v, float px)
         {
             for (const auto& [name, value] : pm.metadata)
             {
-                ImGui::TableNextRow();
+                child_row();
                 cell(col_type, metadata_abbrev(name));
                 cell(col_name, name);
                 c.buf.clear();
@@ -1299,7 +1337,7 @@ void draw_proto_aggregated(Ctx& c, ProtoView& v, float px)
             int64_t prev_ts = pm.ts_ns;
             for (const BusMessage& f : pm.raw_frames)
             {
-                ImGui::TableNextRow();
+                child_row();
                 push_row_color(c, f, 1.0f);
                 c.name_buf.clear();
                 if (uds)
@@ -1460,6 +1498,7 @@ void draw_toolbar(Ctx& c, float px)
     if (ImGui::Button(s.decimal ? "Dec###radix" : "Hex###radix"))
     {
         s.decimal = !s.decimal;
+        s.filter_dirty = s.filter_dirty || !s.filter.text.empty(); // the ID text the filter matches changed
     }
     ImGui::SetItemTooltip("Data and ID columns in hex or decimal");
     same_line_or_wrap(ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize("Autoscroll").x);
@@ -1501,6 +1540,10 @@ void trace_append_data(std::string& out, const BusMessage& m, bool decimal)
     {
         append_error_flags(out, m.errors);
         return;
+    }
+    if (has_flag(m, bus_flag::rtr))
+    {
+        return; // len is the requested DLC, the frame carries no data
     }
     if (!decimal)
     {
@@ -1579,4 +1622,63 @@ void draw_trace_window(App& app, TraceWindowState& s, const WorkspaceTab& tab)
     }
     s.scroll_pending = false;
     ImGui::End();
+}
+
+namespace
+{
+
+constexpr const char* view_attrs[] = {"monitor-view", "uds-view", "j1939-view"};
+
+} // namespace
+
+void trace_window_save_xml(const TraceWindowState& s, const std::deque<Iface>& ifaces, pugi::xml_node el)
+{
+    for (int i = 0; i < static_cast<int>(TraceTab::Count); ++i)
+    {
+        el.append_attribute(view_attrs[i]) = s.modes[i] == TraceViewMode::Rolling ? "log" : "monitor";
+    }
+    el.append_attribute("timestamps") = static_cast<int>(s.ts_mode);
+    el.append_attribute("decimal") = s.decimal;
+    el.append_attribute("filter") = s.filter.text.c_str();
+    el.append_attribute("show-tx") = s.filter.show_tx;
+    el.append_attribute("show-rx") = s.filter.show_rx;
+    for (const uint16_t i : s.filter.hidden_ifaces)
+    {
+        if (i < ifaces.size() && ifaces[i].ops != nullptr)
+        {
+            pugi::xml_node h = el.append_child("hidden-interface");
+            h.append_attribute("driver") = ifaces[i].ops->name;
+            h.append_attribute("interface") = ifaces[i].info.name.c_str();
+        }
+    }
+}
+
+void trace_window_load_xml(TraceWindowState& s, const std::deque<Iface>& ifaces, pugi::xml_node el)
+{
+    for (int i = 0; i < static_cast<int>(TraceTab::Count); ++i)
+    {
+        if (const pugi::xml_attribute a = el.attribute(view_attrs[i]); a)
+        {
+            s.modes[i] = std::string_view(a.as_string()) == "log" ? TraceViewMode::Rolling : TraceViewMode::Aggregated;
+        }
+    }
+    const int ts = el.attribute("timestamps").as_int(static_cast<int>(s.ts_mode));
+    if (ts >= 0 && ts <= static_cast<int>(TimestampMode::AbsoluteUtc))
+    {
+        s.ts_mode = static_cast<TimestampMode>(ts);
+    }
+    s.decimal = el.attribute("decimal").as_bool(s.decimal);
+    s.filter.text = el.attribute("filter").as_string();
+    s.filter_edit = s.filter.text;
+    s.filter.show_tx = el.attribute("show-tx").as_bool(true);
+    s.filter.show_rx = el.attribute("show-rx").as_bool(true);
+    s.filter.hidden_ifaces.clear();
+    for (const pugi::xml_node h : el.children("hidden-interface"))
+    {
+        if (const int i = ifaces_find(ifaces, h.attribute("driver").as_string(), h.attribute("interface").as_string()); i >= 0)
+        {
+            s.filter.hidden_ifaces.insert(static_cast<uint16_t>(i));
+        }
+    }
+    s.filter_dirty = true;
 }

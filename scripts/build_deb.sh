@@ -3,7 +3,7 @@
 # Usage: scripts/build_deb.sh [build-dir]   (default: build/deb)
 # Maintainer defaults to `git config user.name/user.email`; override with
 # DEB_MAINTAINER="Name <mail>". Set JOBS to limit the build parallelism.
-# CMAKE_ARGS: extra configure flags (CI: -DCANGAROO_KVASER=ON). BUNDLE_LIBS: shared
+# CMAKE_ARGS: extra configure flags (CI: -DKRAKEN_KVASER=ON). BUNDLE_LIBS: shared
 # libraries (paths, globs) shipped in usr/lib/<multiarch> because no package provides
 # them (CI: Kvaser's libcanlib built from linuxcan).
 set -eu
@@ -17,7 +17,7 @@ test -n "$VERSION"
 
 # shellcheck disable=SC2086 # CMAKE_ARGS is a list
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCANGAROO_SANITIZE=OFF -DCANGAROO_TESTS=OFF ${CMAKE_ARGS:-}
+  -DKRAKEN_SANITIZE=OFF -DKRAKEN_TESTS=OFF ${CMAKE_ARGS:-}
 cmake --build "$BUILD" -j"${JOBS:-$(nproc)}" --target "$NAME"
 
 STAGE="$BUILD/${NAME}_${VERSION}_${ARCH}"
@@ -60,12 +60,11 @@ Priority: optional
 Architecture: $ARCH
 Depends: $SHLIBS, libgl1, pkexec | policykit-1, iproute2
 Maintainer: $MAINT
-Homepage: https://github.com/Schildkroet/CANgaroo
+Homepage: https://github.com/stoffecpac/kraken-explorer
 Description: Kraken Explorer: Day of the N2K Tentacle
  "Deeper than a Peak. Wireshark is stuck in shallow waters."
- Open-source CAN / CAN FD / LIN / NMEA 2000 bus analyzer based on CANgaroo,
- with SocketCAN, SLCAN and USB adapters, DBC/LDF decoding, trace recording
- and Python scripting.
+ Open-source CAN / CAN FD / LIN / NMEA 2000 bus analyzer with SocketCAN,
+ SLCAN and USB adapters, DBC/LDF decoding, trace recording and Python scripting.
 EOF
 cat > "$STAGE/DEBIAN/postinst" << 'EOF'
 #!/bin/sh

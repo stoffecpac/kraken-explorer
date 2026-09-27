@@ -66,7 +66,8 @@ void app_workspace_commands(App& app)
             app_workspace_run(app, cmd, app.menu.recent_path);
         }
     }
-    if (ImGui::BeginPopupModal(unsaved_popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    bool unsaved_open = true; // the title bar's X = Cancel
+    if (ImGui::BeginPopupModal(unsaved_popup, &unsaved_open, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextUnformatted("The workspace has unsaved changes. Save them first?");
         const float bw = ImGui::GetFontSize() * 6.0f;
@@ -75,7 +76,7 @@ void app_workspace_commands(App& app)
         ImGui::SameLine();
         choice = ImGui::Button("Discard", ImVec2(bw, 0.0f)) ? 2 : choice;
         ImGui::SameLine();
-        choice = ImGui::Button("Cancel", ImVec2(bw, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape) ? 3 : choice;
+        choice = ImGui::Button("Cancel", ImVec2(bw, 0.0f)) || ImGui::Shortcut(ImGuiKey_Escape) ? 3 : choice;
         if (choice != 0)
         {
             ImGui::CloseCurrentPopup();

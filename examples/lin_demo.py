@@ -2,11 +2,11 @@
 LIN bus demonstration.
 
 Demonstrates:
-  - cangaroo.lin_databases()    — list loaded LDF files and their frames
-  - cangaroo.find_lin_frame()   — look up a LIN frame definition by name or ID
-  - cangaroo.make_lin_message() — build a LIN BusMessage
-  - cangaroo.send()             — transmit the frame on a LIN interface
-  - cangaroo.decode_lin()       — decode a received LIN frame using an LDF
+  - kraken.lin_databases()    — list loaded LDF files and their frames
+  - kraken.find_lin_frame()   — look up a LIN frame definition by name or ID
+  - kraken.make_lin_message() — build a LIN BusMessage
+  - kraken.send()             — transmit the frame on a LIN interface
+  - kraken.decode_lin()       — decode a received LIN frame using an LDF
   - msg.bustype                 — distinguish LIN from CAN in a mixed trace
 
 Usage:
@@ -19,7 +19,7 @@ Usage:
 Sends on the LIN interface named IFACE_NAME, else the first LIN interface in
 the measurement.  Without a LIN interface the send step is skipped.
 """
-import cangaroo
+import kraken
 import time
 
 IFACE_NAME   = ""               # LIN interface name; first LIN interface if absent
@@ -31,11 +31,11 @@ LISTEN_SECS  = 5.0              # how long to listen for incoming LIN frames
 # ---------------------------------------------------------------------------
 def find_lin_iface(name):
     """Id of the LIN interface called `name`, else the first LIN one, else None."""
-    lin = [i for i in cangaroo.interfaces() if i["bus_type"] == "LIN"]
+    lin = [i for i in kraken.interfaces() if i["bus_type"] == "LIN"]
     return next((i["id"] for i in lin if i["name"] == name), lin[0]["id"] if lin else None)
 
 print("=== Interfaces ===")
-for iface in cangaroo.interfaces():
+for iface in kraken.interfaces():
     print(f"  [{iface['id']}] {iface['name']}  ({iface['bus_type']})")
 INTERFACE_ID = find_lin_iface(IFACE_NAME)
 print()
@@ -44,7 +44,7 @@ print()
 # 2. Show loaded LDF databases
 # ---------------------------------------------------------------------------
 print("=== LDF Databases ===")
-ldfs = cangaroo.lin_databases()
+ldfs = kraken.lin_databases()
 if not ldfs:
     print("  No LDF files loaded.  Add one in Measurement Setup.")
 else:
@@ -61,7 +61,7 @@ print()
 # 3. Inspect a specific frame definition
 # ---------------------------------------------------------------------------
 print(f"=== Frame definition: {FRAME_NAME!r} ===")
-frame_def = cangaroo.find_lin_frame(FRAME_NAME)
+frame_def = kraken.find_lin_frame(FRAME_NAME)
 if frame_def is None:
     print(f"  Frame {FRAME_NAME!r} not found — check your LDF and FRAME_NAME.")
 else:
@@ -74,7 +74,7 @@ else:
 print()
 
 # Also look up by numeric ID (0x01 as an example)
-frame_by_id = cangaroo.find_lin_frame(0x01)
+frame_by_id = kraken.find_lin_frame(0x01)
 if frame_by_id:
     print(f"Frame at ID 0x01: {frame_by_id['name']!r}")
 print()
@@ -86,23 +86,23 @@ print("=== Send LIN frame ===")
 if INTERFACE_ID is None:
     print("  No LIN interface in the measurement: add a LIN-capable interface in Setup.")
 else:
-    msg = cangaroo.make_lin_message(0x01, 4)
+    msg = kraken.make_lin_message(0x01, 4)
     msg.set_data(bytes([0x11, 0x22, 0x33, 0x44]))
-    cangaroo.send(msg, interface_id=INTERFACE_ID)
+    kraken.send(msg, interface_id=INTERFACE_ID)
     print(f"  Sent: {msg}")
 
     # Send a second frame using a known frame ID from the LDF
     if frame_def is not None:
         lin_id = frame_def['id']
         length  = frame_def['length']
-        tx = cangaroo.make_lin_message(lin_id, length)
+        tx = kraken.make_lin_message(lin_id, length)
         # Fill with a simple incrementing pattern
         tx.set_data(bytes(i & 0xFF for i in range(length)))
-        cangaroo.send(tx, interface_id=INTERFACE_ID)
+        kraken.send(tx, interface_id=INTERFACE_ID)
         print(f"  Sent {FRAME_NAME!r}: {tx}")
 
         # Verify decode of the just-sent frame
-        decoded = cangaroo.decode_lin(tx)
+        decoded = kraken.decode_lin(tx)
         if decoded:
             print(f"  Decoded {decoded['frame']!r}  ID=0x{decoded['id']:02X}")
             for name, sig in decoded['signals'].items():
@@ -119,10 +119,10 @@ lin_count = 0
 can_count = 0
 
 while time.time() < deadline:
-    for msg in cangaroo.receive(timeout=0.2):
+    for msg in kraken.receive(timeout=0.2):
         if msg.bustype == "LIN":
             lin_count += 1
-            decoded = cangaroo.decode_lin(msg)
+            decoded = kraken.decode_lin(msg)
             if decoded:
                 sig_str = "  ".join(
                     f"{n}={v.get('value_name') or format(v['value'], '.4g') + v['unit']}"
@@ -137,7 +137,7 @@ while time.time() < deadline:
                       f"  [{msg.dlc} B]  {msg.get_data().hex(' ')}  (no LDF definition)")
         else:
             can_count += 1
-            decoded = cangaroo.decode(msg)
+            decoded = kraken.decode(msg)
             if decoded:
                 print(f"  CAN  0x{msg.id:03X}  {decoded['message']!r}")
             else:

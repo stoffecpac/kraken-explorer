@@ -40,7 +40,7 @@ where the hooks are implemented on top of an FDCAN driver and a LIN scheduler.
   also tries to open them as CAN channels. Windows caches this descriptor set
   per VID/PID/`bcdDevice`, so bump `bcdDevice` in `usb_descriptors.c` whenever
   you change it.
-- **[CANgaroo](https://github.com/Schildkroet/CANgaroo)** supports all three
+- **[Kraken Explorer](https://github.com/stoffecpac/kraken-explorer)** supports all three
   interfaces out of the box: CAN via SocketCAN or `CandleApiDriver`, LIN via
   `LindeApiDriver`, and I/O in the GPIO Control window. Its
   `docs/usb_interfaces.md` is the detailed protocol reference.
@@ -71,7 +71,7 @@ where the hooks are implemented on top of an FDCAN driver and a LIN scheduler.
    lives there (the `#if GS_USB_ENABLED` / `LIN_USB_ENABLED` blocks in
    `main.c`), so restore those files afterwards, e.g.
    `git checkout -- Core` (`git checkout -- firmware/STM32G4_TinyUSB_CanLinAio/Core`
-   inside CANgaroo).
+   inside Kraken Explorer).
 2. **File → Import → Existing Projects into Workspace**, then build.
 
 ## File layout

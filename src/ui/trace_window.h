@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <set>
 #include <span>
 #include <string>
@@ -17,7 +18,13 @@
 
 struct App;
 struct CanDbSignal;
+struct Iface;
 struct WorkspaceTab;
+
+namespace pugi
+{
+class xml_node;
+}
 
 // Values match the old timestamp_mode_t, so workspace files keep their meaning.
 enum class TimestampMode
@@ -126,6 +133,8 @@ struct TraceWindowState
     uint64_t refilter = UINT64_MAX; // next index of a running rolling-log refilter, UINT64_MAX = none
     uint64_t index_base = 0;  // trace index shown as Index 1 (the trace begin at the last clear)
     uint64_t clears = 0;      // Trace::clears last seen
+    bool was_measuring = false;
+    int64_t cycle_cut_ns = 0; // measurement stop seen at this time: no cycle spans it
     int64_t first_ts_ns = 0;
     std::vector<TraceRow> rolling;
     std::unordered_map<uint64_t, uint64_t> last_by_key; // delta key -> trace index
@@ -176,3 +185,8 @@ void trace_append_id(std::string& out, const BusMessage& m, bool decimal);
 void trace_append_signal_value(std::string& out, const CanDbSignal& sig, uint64_t raw);
 
 void draw_trace_window(App& app, TraceWindowState& s, const WorkspaceTab& tab);
+
+// <tracewindow> of a workspace tab: view modes, timestamps, hex/dec, filter text, TX/RX and
+// hidden interfaces (by driver + name).
+void trace_window_save_xml(const TraceWindowState& s, const std::deque<Iface>& ifaces, pugi::xml_node el);
+void trace_window_load_xml(TraceWindowState& s, const std::deque<Iface>& ifaces, pugi::xml_node el);

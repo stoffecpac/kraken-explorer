@@ -2,7 +2,7 @@
 
 The STM32G473 adapter firmware enumerates as **one composite USB device** with up to three
 vendor-specific interfaces. Each interface has its own bulk endpoint pair and its
-own host driver in CANgaroo.
+own host driver in Kraken Explorer.
 
 The device side is available as a reference implementation:
 [`firmware/STM32G4_TinyUSB_CanLinAio/`](../firmware/STM32G4_TinyUSB_CanLinAio/README.md),
@@ -13,10 +13,10 @@ directory. Channel counts, clocks and I/O sizes quoted below are that project's
 defaults; a real adapter sizes them for its hardware and reports them in
 `DEVICE_CONFIG` / `BT_CONST`, so hosts must always read them from the device.
 
-| Interface | Purpose | `bInterfaceProtocol` | Endpoints (IN / OUT) | Host driver (CANgaroo) |
-|-----------|---------|----------------------|----------------------|------------------------|
-| gs_usb  | CAN channels            | `0xFF` | `0x81` / `0x02` | SocketCAN (Linux, kernel `gs_usb`), `CandleApiDriver` (Windows) |
-| lin_usb | LIN channels            | `0x01` | `0x83` / `0x04` | `LindeApiDriver` (all platforms) |
+| Interface | Purpose | `bInterfaceProtocol` | Endpoints (IN / OUT) | Host driver (Kraken Explorer) |
+|-----------|---------|----------------------|----------------------|-------------------------------|
+| gs_usb  | CAN channels            | `0xFF` | `0x81` / `0x02` | SocketCAN (kernel `gs_usb`) |
+| lin_usb | LIN channels            | `0x01` | `0x83` / `0x04` | `LindeApiDriver` (libusb) |
 | aio_usb | Digital I/O + analog in | `0x02` | `0x85` / `0x06` | `AiodeDriver` (`AiodeApi`, GPIO Control window) |
 
 ## Common ground
@@ -85,8 +85,7 @@ channel does not work: only one handle can claim the interface.
 
 ## gs_usb (CAN)
 
-Compatible with the Linux kernel `gs_usb` driver (`drivers/net/can/usb/gs_usb.c`) and
-the candleLight Windows API. Firmware: [`Src/gs_usb.c`](../firmware/STM32G4_TinyUSB_CanLinAio/Core/Src/gs_usb.c) /
+Compatible with the Linux kernel `gs_usb` driver (`drivers/net/can/usb/gs_usb.c`). Firmware: [`Src/gs_usb.c`](../firmware/STM32G4_TinyUSB_CanLinAio/Core/Src/gs_usb.c) /
 [`Inc/gs_usb.h`](../firmware/STM32G4_TinyUSB_CanLinAio/Core/Inc/gs_usb.h) (transport, weak `gs_engine_*` hooks for the
 FDCAN code), config in [`Inc/gs_usb_config.h`](../firmware/STM32G4_TinyUSB_CanLinAio/Core/Inc/gs_usb_config.h)
 (`GS_USB_CAN_CHANNEL_COUNT` 2, FDCAN clock 96 MHz). The clock differs between
@@ -156,24 +155,12 @@ frame per transfer.
 ### Host side
 
 - **Linux:** the kernel `gs_usb` driver binds interface 0 and creates `canX`
-  netdevs; CANgaroo uses them through `SocketCanDriver`. Opening the LIN/AIO
+  netdevs; Kraken Explorer uses them through `SocketCanDriver`. Opening the LIN/AIO
   interfaces with libusb does not detach it.
-- **Windows:** the BOS / MS OS 2.0 descriptor marks every interface as WinUSB,
-  each with its own `DeviceInterfaceGUID`, so no driver install is needed:
-
-  | Interface | `DeviceInterfaceGUID` | Opened by |
-  | :-- | :-- | :-- |
-  | gs_usb  | `{c15b4308-04d3-11e6-b3ea-6057189e6443}` (candleLight) | `CandleApiDriver` |
-  | lin_usb | `{dfaa1f65-e194-414c-ac5d-66ea6a8ba9c9}` | `LindeApiDriver` |
-  | aio_usb | `{4c86c041-3321-446b-ba72-6a4be9f1c2b0}` | `AiodeDriver` |
-
-  Each host driver opens only its own interface's device node. WinUSB allows one
-  handle per interface, and `libusb_open()` opens *all* WinUSB interfaces of a
-  composite device, so libusb would fail with "access denied" as soon as another
-  driver holds a sibling interface. That is why lin_usb and aio_usb go through
-  `UsbVendorInterface` (`src/driver/UsbVendorInterface/`): libusb on
-  Linux/macOS, WinUSB by GUID on Windows. The GUIDs are duplicated in
-  `LindeSharedDevice.h` and `AiodeApi.hpp`; keep them in sync with the firmware.
+- The firmware also carries a BOS / MS OS 2.0 descriptor (WinUSB, one
+  `DeviceInterfaceGUID` per interface) so other hosts need no driver install.
+  Kraken Explorer is Linux-only and does not use it; lin_usb and aio_usb are
+  opened with libusb (`src/drivers/usb_vendor/`).
 
 ---
 
@@ -319,7 +306,7 @@ Configuring an output applies `default_state` immediately.
 (`AiodeApi::scan()` opens every AIO device). It polls `READ_STATUS` from a
 background thread and does not use the bulk IN auto-report. The `GpioProvider`
 interface uses 16-bit direction/output masks, so only lines 0–15 can be driven
-from CANgaroo, although the protocol addresses 32.
+from Kraken Explorer, although the protocol addresses 32.
 
 ---
 

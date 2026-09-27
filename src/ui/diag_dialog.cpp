@@ -154,7 +154,7 @@ bool draw_diag_dialog(App& app, DiagDialogState& d, LinDiagRequest& out)
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(80.0f * px, 0.0f)))
+    if (ImGui::Button("Cancel", ImVec2(80.0f * px, 0.0f)) || ImGui::Shortcut(ImGuiKey_Escape))
     {
         d.open = false;
         ImGui::CloseCurrentPopup();

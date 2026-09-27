@@ -66,7 +66,8 @@ void draw_recording_dialog(App& app, RecordingDialogState& s)
     }
     const float em = ImGui::GetFontSize();
     ImGui::SetNextWindowSize(ImVec2(em * 34.0f, 0.0f), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal(popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    bool open = true; // the title bar's X = Cancel
+    if (!ImGui::BeginPopupModal(popup, &open, ImGuiWindowFlags_AlwaysAutoResize))
     {
         return;
     }
@@ -101,7 +102,9 @@ void draw_recording_dialog(App& app, RecordingDialogState& s)
         ImGui::EndCombo();
     }
     const auto now = std::chrono::current_zone()->to_local(std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
-    ImGui::TextDisabled("Example: %s", recorder_file_name(s.edit, now, 1).c_str());
+    RecordingConfig example = s.edit; // the split checkbox below only reaches s.edit on OK
+    example.split_size_mb = s.split ? s.split_mb : 0;
+    ImGui::TextDisabled("Example: %s", recorder_file_name(example, now, 1).c_str());
 
     ImGui::SeparatorText("Split Files");
     ImGui::Checkbox("Start a new file every", &s.split);
@@ -132,7 +135,7 @@ void draw_recording_dialog(App& app, RecordingDialogState& s)
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(em * 6.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    if (ImGui::Button("Cancel", ImVec2(em * 6.0f, 0.0f)) || ImGui::Shortcut(ImGuiKey_Escape))
     {
         ImGui::CloseCurrentPopup();
     }

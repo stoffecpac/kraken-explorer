@@ -5,7 +5,7 @@ CAN message with ID 0x123 every 200 ms.
 Usage: Paste into the Script window and click Run while a measurement is active.
 Press Stop to end the script.
 """
-import cangaroo
+import kraken
 import os
 import time
 
@@ -17,13 +17,13 @@ IFACE_NAME = "vcan0"         # TX interface; first interface if absent
 
 def find_iface(name):
     """Id of the interface called `name`, else the first one in the measurement."""
-    ifaces = cangaroo.interfaces()
+    ifaces = kraken.interfaces()
     if not ifaces:
         raise RuntimeError("No interfaces in the measurement: add one in Setup and start the measurement")
     return next((i["id"] for i in ifaces if i["name"] == name), ifaces[0]["id"])
 
 # Print available interfaces
-for iface in cangaroo.interfaces():
+for iface in kraken.interfaces():
     print(f"Interface {iface['id']}: {iface['name']}")
 
 INTERFACE_ID = find_iface(IFACE_NAME)
@@ -36,10 +36,10 @@ last_send = time.time()
 while True:
     # receive() blocks up to timeout — use a short timeout so we can
     # send at the desired interval even when no messages arrive.
-    messages = cangaroo.receive(timeout=0.02)
+    messages = kraken.receive(timeout=0.02)
 
     for msg in messages:
-        iface = cangaroo.interface_name(msg.interface_id)
+        iface = kraken.interface_name(msg.interface_id)
         data_hex = msg.get_data().hex(' ')
 
         if msg.extended:
@@ -64,9 +64,9 @@ while True:
     # Send a random message every TX_INTERVAL
     now = time.time()
     if now - last_send >= TX_INTERVAL:
-        tx = cangaroo.Message()
+        tx = kraken.Message()
         tx.id = TX_ID
         tx.set_data(os.urandom(TX_DLC))
-        cangaroo.send(tx, interface_id=INTERFACE_ID)
+        kraken.send(tx, interface_id=INTERFACE_ID)
         print(f"TX  0x{tx.id:03X}  [{tx.dlc}]  {tx.get_data().hex(' ')}")
         last_send = now

@@ -4,8 +4,10 @@
 #include <format>
 
 #include <imgui.h>
+#include <pugixml.hpp>
 
 #include "app.h"
+#include "core/log.h"
 #include "ui/raw_tx.h"
 #include "ui/theme.h"
 
@@ -83,6 +85,18 @@ GatewayRuleProblem gateway_rule_problem(const Gateway& gw, uint16_t src, uint16_
     return GatewayRuleProblem::None;
 }
 
+bool gateway_rule_reroute(Gateway& gw, std::size_t i, uint16_t src, uint16_t dst)
+{
+    if (i >= gw.rules.size() || src == UINT16_MAX || dst == UINT16_MAX || src == dst)
+    {
+        return false;
+    }
+    std::scoped_lock lock(gw.mutex);
+    gw.rules[i].src = src;
+    gw.rules[i].dst = dst;
+    return true;
+}
+
 void gateway_rx_consumer(void* user, const BusMessage& m)
 {
     auto& gw = *static_cast<Gateway*>(user);
@@ -117,15 +131,17 @@ void draw_gateway(App& app, Gateway& gw)
     }
     {
         std::scoped_lock lock(gw.mutex);
-        ImGui::Checkbox("Enable Gateway", &gw.enabled);
+        if (ImGui::Checkbox("Enable Gateway", &gw.enabled) && gw.enabled)
+        {
+            gw.forwarded = 0; // counts from this enable on
+            gw.failed = 0;
+        }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%llu forwarded, %llu failed", static_cast<unsigned long long>(gw.forwarded.load()),
                         static_cast<unsigned long long>(gw.failed.load()));
     ImGui::Separator();
 
-    const bool enabled = gw.enabled; // only the UI writes it
-    ImGui::BeginDisabled(!enabled);
     if (ImGui::BeginTable("##add", 2, ImGuiTableFlags_SizingStretchProp))
     {
         ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed);
@@ -187,9 +203,7 @@ void draw_gateway(App& app, Gateway& gw)
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (draw_iface_combo("##rdst", app, dst, BusType::CAN) || src_changed)
             {
-                std::scoped_lock lock(gw.mutex);
-                rule.src = src;
-                rule.dst = dst;
+                (void)gateway_rule_reroute(gw, static_cast<std::size_t>(i), src, dst);
             }
             ImGui::PopID();
         }
@@ -203,11 +217,57 @@ void draw_gateway(App& app, Gateway& gw)
         gw.selected = -1;
     }
     ImGui::EndDisabled();
-    ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("OK"))
     {
         gw.open = false;
     }
     ImGui::End();
+}
+
+void gateway_save_xml(const Gateway& gw, const std::deque<Iface>& ifaces, pugi::xml_node root)
+{
+    if (gw.rules.empty() && !gw.enabled)
+    {
+        return;
+    }
+    pugi::xml_node el = root.append_child("gateway");
+    el.append_attribute("enabled") = gw.enabled;
+    const auto put = [&](pugi::xml_node r, const char* driver, const char* name, uint16_t i)
+    {
+        r.append_attribute(driver) = i < ifaces.size() && ifaces[i].ops != nullptr ? ifaces[i].ops->name : "";
+        r.append_attribute(name) = i < ifaces.size() ? ifaces[i].info.name.c_str() : "";
+    };
+    for (const GatewayRule& rule : gw.rules)
+    {
+        pugi::xml_node r = el.append_child("rule");
+        r.append_attribute("id") = rule.id;
+        r.append_attribute("extended") = rule.extended;
+        r.append_attribute("name") = rule.name.c_str();
+        put(r, "src-driver", "src", rule.src);
+        put(r, "dst-driver", "dst", rule.dst);
+    }
+}
+
+void gateway_load_xml(Gateway& gw, const std::deque<Iface>& ifaces, pugi::xml_node root)
+{
+    const pugi::xml_node el = root.child("gateway");
+    std::vector<GatewayRule> rules;
+    for (const pugi::xml_node r : el.children("rule"))
+    {
+        const int src = ifaces_find(ifaces, r.attribute("src-driver").as_string(), r.attribute("src").as_string());
+        const int dst = ifaces_find(ifaces, r.attribute("dst-driver").as_string(), r.attribute("dst").as_string());
+        if (src < 0 || dst < 0 || src == dst)
+        {
+            log_warning(std::format("Gateway rule 0x{:X} {} -> {} dropped: interface not found", r.attribute("id").as_uint(),
+                                    r.attribute("src").as_string(), r.attribute("dst").as_string()));
+            continue;
+        }
+        rules.push_back({.id = r.attribute("id").as_uint(), .extended = r.attribute("extended").as_bool(),
+                         .name = r.attribute("name").as_string(), .src = static_cast<uint16_t>(src), .dst = static_cast<uint16_t>(dst)});
+    }
+    std::scoped_lock lock(gw.mutex);
+    gw.rules = std::move(rules);
+    gw.enabled = el.attribute("enabled").as_bool();
+    gw.selected = -1;
 }

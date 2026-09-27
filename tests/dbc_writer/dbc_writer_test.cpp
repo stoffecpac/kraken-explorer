@@ -209,7 +209,7 @@ TEST_CASE("dbc_write_file writes a parseable file and reports open failures")
     CanDb db;
     REQUIRE(dbc_parse(sample, db));
 
-    const auto path = std::filesystem::temp_directory_path() / "cangaroo_dbc_writer_test.dbc";
+    const auto path = std::filesystem::temp_directory_path() / "kraken_dbc_writer_test.dbc";
     std::string error;
     REQUIRE(dbc_write_file(db, path, &error));
     CHECK(error.empty());
@@ -218,7 +218,7 @@ TEST_CASE("dbc_write_file writes a parseable file and reports open failures")
     check_equal(db, back);
     std::filesystem::remove(path);
 
-    const auto bad = std::filesystem::temp_directory_path() / "cangaroo_no_such_dir" / "x.dbc";
+    const auto bad = std::filesystem::temp_directory_path() / "kraken_no_such_dir" / "x.dbc";
     CHECK_FALSE(dbc_write_file(db, bad, &error));
     CHECK_FALSE(error.empty());
     CHECK_FALSE(dbc_write_file(db, bad, nullptr));   // error pointer is optional

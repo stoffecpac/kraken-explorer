@@ -1,10 +1,10 @@
-"""Read cangaroo's sample traces back with readers that share no code with it.
+"""Read Kraken Explorer's sample traces back with readers that share no code with it.
 
 tests/format_compat/main.cpp writes every export format (export.*, empty.*) and
 TraceRecorder output split into 1 MB parts (recorder_*/). Each file is parsed
 by an independent implementation of its format and compared with the frames
 below, which are defined here again instead of being taken from anything
-cangaroo wrote:
+Kraken Explorer wrote:
 
   candump, Vector ASC   python-can  (CanutilsLogReader, ASCReader)
   PEAK TRC              python-can  (TRCReader; it skips error frames, so

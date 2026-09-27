@@ -51,6 +51,7 @@ bin/
 tests/target_wrapper.sh
 tests/*/target_wrapper.sh
 
-*.cangaroo
+*.kraken
 *.asc
 __pycache__/
+imgui.ini

@@ -106,9 +106,13 @@ void tx_signal_set(const CanDbSignal& sig, BusMessage& msg, double physical) noe
 }
 
 // Main thread, with each RX batch: arms the enabled OnReceive rows whose id/interface
-// matches (TX echoes and error frames ignored), due `now + delay_ms`; wakes the sender.
+// matches (TX echoes and error frames ignored), due `delay_ms` after the frame's reception:
+// `now + delay_ms - (wall_now_ns - ts_ns)` (a timestamp older than 1 s counts as received now).
+// Wakes the sender.
 void tx_generator_on_rx(TxGenerator& gen, std::span<const BusMessage> msgs,
-                        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+                        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now(),
+                        int64_t wall_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
 
 // Draws the tab's "Generator View" and "Message View" windows.
 void draw_tx_generator(App& app, const WorkspaceTab& tab, TxGenerator& gen);

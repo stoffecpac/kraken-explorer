@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <span>
 
 // Summary statistics of a sample set. Header-only, no allocation.
@@ -10,6 +11,7 @@ struct Stats
     double max = 0.0;
     double mean = 0.0;
     double median = 0.0;
+    double stddev = 0.0; // population standard deviation
 };
 
 // Reorders v (std::nth_element) to find the median, so pass a scratch copy you may shuffle.
@@ -29,6 +31,12 @@ struct Stats
         sum += x;
     }
     s.mean = sum / static_cast<double>(v.size());
+    double sq = 0.0;
+    for (const double x : v)
+    {
+        sq += (x - s.mean) * (x - s.mean);
+    }
+    s.stddev = std::sqrt(sq / static_cast<double>(v.size()));
     const auto mid = v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2);
     std::nth_element(v.begin(), mid, v.end());
     s.median = *mid;

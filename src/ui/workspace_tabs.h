@@ -26,6 +26,7 @@ struct WorkspaceTabs
     std::vector<WorkspaceTab> tabs;
     int current = 0;     // index into tabs; windows of other tabs are not drawn
     bool select_current = false; // force the tab bar onto `current` next frame (new tab)
+    bool hold_close = false;     // no close buttons until the mouse leaves the bar (after "+")
     unsigned next_uid = 1;
     unsigned rename_uid = 0; // tab being renamed in the "Rename tab" popup (0 = none)
     std::string rename_buf;

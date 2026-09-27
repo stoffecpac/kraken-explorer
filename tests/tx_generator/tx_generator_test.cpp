@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <cstdio>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -318,6 +319,24 @@ TEST_CASE("on-receive trigger arms matching rows with their delay")
     CHECK(gen.rows[1].pending);
 }
 
+// T87b a2 F10: the frame was received 30 ms before this UI frame; a 50 ms delay is due 20 ms
+// from now, not 50. A stale timestamp (older than 1 s, e.g. replayed) counts as received now.
+TEST_CASE("on-receive delay runs from the frame's reception time")
+{
+    TxGenerator gen;
+    gen.rows.push_back({.name = "resp", .enabled = true, .trigger = TxTrigger::OnReceive, .rx_id = 0x123, .rx_iface = 1, .delay_ms = 50});
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr int64_t wall = 1757000000000000000LL;
+    const BusMessage late{.id = 0x123, .iface = 1, .ts_ns = wall - 30000000};
+    tx_generator_on_rx(gen, std::span(&late, 1), t0, wall);
+    CHECK(gen.rows[0].next_due == t0 + std::chrono::milliseconds(20));
+
+    gen.rows[0].pending = false;
+    const BusMessage stale{.id = 0x123, .iface = 1, .ts_ns = wall - 5000000000};
+    tx_generator_on_rx(gen, std::span(&stale, 1), t0, wall);
+    CHECK(gen.rows[0].next_due == t0 + std::chrono::milliseconds(50));
+}
+
 TEST_CASE("on-receive row is sent once per trigger by the sender thread")
 {
     std::deque<Iface> ifaces;
@@ -371,6 +390,7 @@ TEST_CASE("cyclic frames come out on vcan0")
     Iface& i = ifaces.emplace_back();
     i.ops = &socketcan_driver;
     i.info.name = "vcan0";
+    i.info.details = "vcan"; // as enumerate: never `ip link set` (pkexec) the shared vcan
     Setup setup;
     setup.networks.push_back({.interfaces = {{.driver = "SocketCAN", .name = "vcan0"}}});
     REQUIRE(ifaces_start(ifaces, setup, {}, nullptr) == 1);
@@ -489,6 +509,56 @@ TEST_CASE("vim keys in Available Messages: j selects, Enter adds the DBC message
     CHECK(gen.rows[0].msg.id == (first.raw_id & can_id_mask_extended));
 }
 
+// T87b a2 F1: the DBC keeps bit 31 on extended ids (0x98FEEE00); the list shows and searches 0x18FEEE00.
+TEST_CASE("Available Messages lists and finds extended ids without the DBC's bit 31")
+{
+    const UiTest ui({1600, 900});
+    App app;
+    auto db = std::make_shared<CanDb>();
+    std::vector<DbcError> errors;
+    const bool parsed = dbc_parse("VERSION \"\"\n\nNS_ :\n\nBS_:\n\nBU_: X\n\n"
+                      "BO_ 256 Other: 8 X\n SG_ A : 0|8@1+ (1,0) [0|255] \"\" X\n\n"
+                      "BO_ 2566843904 Temp: 8 X\n SG_ B : 0|8@1+ (1,0) [0|255] \"\" X\n",
+                      *db, &errors);
+    CHECK(errors.empty());
+    REQUIRE(parsed);
+    Iface& i = app.ifaces.emplace_back();
+    i.ops = &fake_driver;
+    i.info.name = "fake0";
+    SetupNetwork net;
+    net.interfaces.push_back({.driver = "Fake", .name = "fake0"});
+    net.can_dbs.push_back(db);
+    app.setup.networks.push_back(std::move(net));
+    const WorkspaceTab tab{.uid = 7};
+    TxGenerator gen;
+    std::snprintf(gen.search, sizeof gen.search, "18feee");
+    ui_frame(app, tab, gen);
+    ui_frame(app, tab, gen, "/##available_");
+    type(app, tab, gen, 'j');
+    REQUIRE(gen.layout_msg != nullptr);
+    CHECK(gen.layout_msg->name == "Temp");
+}
+
+// T87b a2 F4: RUN / ▶ on a selection never enables its Manual rows (they only send on Send),
+// so a later trigger change can't start sending on its own.
+TEST_CASE("starting a selection leaves its Manual rows stopped")
+{
+    const UiTest ui({1600, 900});
+    App app;
+    app.measuring = true;
+    const WorkspaceTab tab{.uid = 8};
+    TxGenerator gen;
+    gen.rows.push_back({.msg = BusMessage{.id = 0x300}, .name = "r", .selected = true, .trigger = TxTrigger::OnReceive, .rx_id = 0x7FF});
+    gen.rows.push_back({.msg = BusMessage{.id = 0x301}, .name = "m", .selected = true, .trigger = TxTrigger::Manual});
+    ui_frame(app, tab, gen);
+    ui_frame(app, tab, gen, workspace_window_name(tab, "Generator View"));
+    gen.current = 0;
+    press(app, tab, gen, ImGuiKey_Space);
+    std::scoped_lock lock(gen.mutex);
+    CHECK(gen.rows[0].enabled);
+    CHECK_FALSE(gen.rows[1].enabled);
+}
+
 // K58's IntelF vector from cantools 44.1 (tests/can_db_signal): 0|32@1 float32 = 3.14159 -> d00f4940.
 // The signal editor's InputDouble feeds tx_signal_set, which must store the IEEE bit pattern.
 TEST_CASE("a float32 signal set from the editor stores the IEEE-754 bit pattern like cantools")
@@ -499,4 +569,32 @@ TEST_CASE("a float32 signal set from the editor stores the IEEE-754 bit pattern 
     tx_signal_set(intel_f, m, 3.14159);
     CHECK(std::vector<uint8_t>(m.data.begin(), m.data.begin() + 8) == std::vector<uint8_t>{0xd0, 0x0f, 0x49, 0x40, 0, 0, 0, 0});
     CHECK(can_signal_extract_physical(intel_f, m) == 3.141590118408203);
+}
+
+// T87b a2: the expanded row's On-receive settings and signal table were squeezed into the Name
+// column (labels clipped, "deg(" for units); they span the whole table width now.
+TEST_CASE("expanded row details span the table width, not the Name column")
+{
+    const UiTest ui({1600, 900});
+    App app;
+    const WorkspaceTab tab{.uid = 6};
+    TxGenerator gen;
+    gen.rows.push_back({.msg = BusMessage{.id = 0x300}, .name = "r", .trigger = TxTrigger::OnReceive, .rx_id = 0x7FF, .expanded = true});
+    ui_frame(app, tab, gen);
+    ui_frame(app, tab, gen);
+    const auto window_width = [](std::string_view part)
+    {
+        for (const ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+        {
+            if (std::string_view(w->Name).find(part) != std::string_view::npos)
+            {
+                return w->Size.x;
+            }
+        }
+        return 0.0f;
+    };
+    const float table = window_width("##active");
+    const float details = window_width("##details");
+    REQUIRE(table > 0.0f);
+    CHECK(details >= table * 0.9f);
 }

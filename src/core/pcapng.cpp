@@ -1,20 +1,20 @@
 /*
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "pcapng.h"
@@ -111,7 +111,7 @@ void append_socketcan_frame(std::vector<uint8_t>& out, const BusMessage& m)
 
 void pcapng_append_section_header(std::vector<uint8_t>& out)
 {
-    constexpr std::string_view app_name = "CANgaroo";
+    constexpr std::string_view app_name = "Kraken Explorer";
     constexpr uint32_t opt_len = 4 + padded4(app_name.size()) + 4;  // userappl + endofopt
     // type(4) + total_length(4) + bom(4) + major(2) + minor(2) + section_length(8) + options + total_length(4)
     constexpr uint32_t total_len = 4 + 4 + 4 + 2 + 2 + 8 + opt_len + 4;

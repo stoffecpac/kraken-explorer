@@ -5,12 +5,16 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <sstream>
+#include <string>
 
 #include <imgui.h>
 #include <imgui_internal.h> // FindWindowByName
 
 #include "app.h"
 
+#include "db/dbc/dbc_parser.h"
+#include "db/dbc/dbc_writer.h"
 #include "db/model/can_db.h"
 #include "ui/dbc_editor.h"
 #include "ui/workspace_tabs.h"
@@ -218,4 +222,82 @@ TEST_CASE("the window draws headless with a message and a signal selected")
     }
     CHECK(ImGui::FindWindowByName(workspace_window_name(tab, "DBC Editor").c_str()) != nullptr);
     CHECK(!s.dirty); // drawing alone never edits
+}
+
+TEST_CASE("the form's start bit is the DBC's, also for Motorola (T87b a3 F6)")
+{
+    // kraken_tentacles.dbc: InkPressure 23|16@0+ (MSB bit 23 = byte 2 bit 7), InkLevel 7|16@0+.
+    CanDb db;
+    REQUIRE(dbc_parse("BO_ 513 Ink: 8 Vector__XXX\n"
+                      " SG_ InkLevel : 7|16@0+ (1,0) [0|65535] \"\" Vector__XXX\n"
+                      " SG_ InkPressure : 23|16@0+ (1,0) [0|65535] \"\" Vector__XXX\n",
+                      db));
+    CanDbSignal& level = db.messages.at(513).signals[0];
+    CanDbSignal& pressure = db.messages.at(513).signals[1];
+    CHECK(dbc_start_bit(level) == 7);
+    CHECK(dbc_start_bit(pressure) == 23);
+    dbc_set_start_bit(pressure, 39); // byte 4 bit 7
+    std::ostringstream out;
+    dbc_write(db, out);
+    CHECK(out.str().find("SG_ InkPressure : 39|16@0+") != std::string::npos);
+    CHECK(out.str().find("SG_ InkLevel : 7|16@0+") != std::string::npos);
+}
+
+namespace
+{
+
+// The form child's window (its ids hang off it), found by name "<editor>/form_<id>".
+ImGuiWindow* form_window()
+{
+    for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+    {
+        if (std::string_view(w->Name).find("/form_") != std::string_view::npos)
+        {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("typing a new message id re-keys once, when the field is left (T87b a3 F7)")
+{
+    const UiTest ui;
+    App app;
+    const WorkspaceTab& tab = workspace_add_tab(app.workspace);
+    DbcEditorState& s = app.dbc_editors[tab.uid];
+    dbc_editor_load(s, sample_db(), "");
+    s.open = true;
+    dbc_editor_select(s, row_of(s, 0x100, -1));
+    const auto frame = [&]
+    {
+        ImGui::NewFrame();
+        draw_dbc_editor(app, s, tab);
+        ImGui::EndFrame();
+    };
+    frame();
+    frame();
+    ImGuiWindow* form = form_window();
+    REQUIRE(form != nullptr);
+    ImGui::ActivateItemByID(form->GetID("Id (hex)"));
+    ImGui::GetCurrentContext()->NavNextActivateFlags = ImGuiActivateFlags_PreferInput; // as a click / Tab would
+    frame();
+    frame();
+    for (const char c : std::string_view("250"))
+    {
+        ImGui::GetIO().AddInputCharacter(static_cast<unsigned>(c));
+        frame();
+        CHECK(s.db.messages.count(0x100) == 1); // "2" and "25" must not move it to 0x002 / 0x025
+        CHECK(s.db.messages.size() == 2);
+    }
+    CHECK(s.id_text == "250");
+    ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, true);
+    frame();
+    ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, false);
+    frame();
+    CHECK(s.db.messages.count(0x100) == 0);
+    REQUIRE(s.db.messages.count(0x250) == 1);
+    CHECK(s.db.messages.at(0x250).name == "EngineData");
+    CHECK_FALSE(s.id_conflict);
 }

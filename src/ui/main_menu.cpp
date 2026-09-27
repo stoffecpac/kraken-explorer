@@ -393,10 +393,6 @@ void draw_control_bar(App& app)
         draw_record_button(app);
         same_line_or_wrap(command_button_width("Clear"));
         command_button(app, Command::TraceClear, Icon::EditClear, "Clear");
-        same_line_or_wrap(command_button_width("Tab"));
-        command_button(app, Command::NewTraceView, Icon::File, "Tab");
-        same_line_or_wrap(command_button_width("Graph"));
-        command_button(app, Command::StandaloneGraph, Icon::Graph, "Graph");
         same_line_or_wrap(button_width("Gateway"));
         ImGui::BeginDisabled(!enabled(app, Command::Gateway));
         if (ImGui::Button("Gateway"))
@@ -446,7 +442,7 @@ void draw_about(App& app)
         ImGui::PopFont();
         ImGui::TextDisabled("Deeper than a Peak. Wireshark is stuck in shallow waters.");
         ImGui::Spacing();
-        ImGui::Text("Version " VERSION_STRING "   \xc2\xb7   Based on CANgaroo   \xc2\xb7   %.1f fps (%.2f ms/frame)", fps,
+        ImGui::Text("Version " VERSION_STRING "   \xc2\xb7   %.1f fps (%.2f ms/frame)", fps,
                     fps > 0.0f ? 1000.0f / fps : 0.0f);
         ImGui::EndGroup();
         ImGui::Spacing();

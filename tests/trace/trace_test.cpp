@@ -108,3 +108,26 @@ TEST_CASE("two interfaces with overlapping times drain into a time-ordered trace
         CHECK(trace_at(trace, i).iface == expected[i].second);
     }
 }
+
+// T87b a1 F6: a frame of vcan1 lands one main-loop frame after a newer one of vcan0; the trace
+// keeps arrival order, the copy that files and scripts get is in time order.
+TEST_CASE("trace_copy is time-ordered across main-loop batches")
+{
+    const auto frame = [](uint16_t iface, int64_t ts) { return BusMessage{.iface = iface, .ts_ns = ts}; };
+    Trace trace;
+    std::vector<BusMessage> batch = {frame(0, 10), frame(0, 30)};
+    trace_append_sorted(trace, batch);
+    batch = {frame(1, 20), frame(0, 40)};
+    trace_append_sorted(trace, batch);
+
+    CHECK(trace_at(trace, 2).ts_ns == 20); // arrival order in the trace
+    const std::vector<BusMessage> copy = trace_copy(trace);
+    const std::vector<std::pair<int64_t, uint16_t>> expected = {{10, 0}, {20, 1}, {30, 0}, {40, 0}};
+    REQUIRE(copy.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i)
+    {
+        CAPTURE(i);
+        CHECK(copy[i].ts_ns == expected[i].first);
+        CHECK(copy[i].iface == expected[i].second);
+    }
+}

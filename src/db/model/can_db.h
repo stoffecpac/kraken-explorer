@@ -3,20 +3,20 @@
   Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -104,6 +104,12 @@ void can_signal_inject_raw(const CanDbSignal& sig, BusMessage& m, uint64_t raw) 
 // Rounds to the nearest raw value; unsigned signals saturate at 0. Float signals store
 // (physical - offset) / factor as IEEE bits.
 void can_signal_inject_physical(const CanDbSignal& sig, BusMessage& m, double physical) noexcept;
+// Printf format for sig's physical values: integer signals with the decimals of factor and offset
+// ("%.2f" for 0.01, "%.7f" for 1e-07), so every value is exact and computed ones (B - A, mean)
+// carry no float noise; float32 "%.7g", float64 "%.15g".
+[[nodiscard]] std::string can_signal_printf(const CanDbSignal& sig);
+// A physical value of sig in that format; "-0.00" comes out as "0.00".
+[[nodiscard]] std::string can_signal_format(const CanDbSignal& sig, double v);
 // Empty when the value has no name.
 [[nodiscard]] std::string_view can_signal_value_name(const CanDbSignal& sig, uint64_t value);
 

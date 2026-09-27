@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <cstdlib>
 #include <format>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <random>
@@ -15,6 +16,7 @@
 #include <pugixml.hpp>
 
 #include "app.h"
+#include "core/fuzzy.h"
 #include "core/log.h"
 #include "core/text.h"
 #include "db/model/can_db.h"
@@ -27,16 +29,18 @@ namespace
 {
 
 using TxClock = std::chrono::steady_clock;
+constexpr std::chrono::seconds max_rx_age{1};
 
 [[nodiscard]] std::string iface_label(const std::deque<Iface>& ifaces, uint16_t index)
 {
     return index < ifaces.size() ? ifaces[index].info.name : std::format("#{}", index);
 }
 
-// Caller holds gen.mutex. Starting needs a running measurement; stopping always works.
+// Caller holds gen.mutex. Starting needs a running measurement and a timed trigger (a Manual row
+// only sends on its Send button); stopping always works.
 void set_enabled(TxGenerator& gen, TxCyclic& row, bool enabled, bool measuring)
 {
-    if (enabled && !measuring)
+    if (enabled && (!measuring || row.trigger == TxTrigger::Manual))
     {
         return;
     }
@@ -52,7 +56,7 @@ void set_enabled(TxGenerator& gen, TxCyclic& row, bool enabled, bool measuring)
 // Caller holds gen.mutex. A shorter cycle takes effect now, not after the old deadline.
 void set_interval(TxGenerator& gen, TxCyclic& row, int interval_ms)
 {
-    row.interval_ms = std::max(1, interval_ms);
+    row.interval_ms = std::clamp(interval_ms, 1, 60000); // as the Interval field under the table
     const auto latest = TxClock::now() + std::chrono::milliseconds(row.interval_ms);
     if (row.next_due > latest)
     {
@@ -354,14 +358,21 @@ void draw_available(App& app, TxGenerator& gen)
             std::vector<const CanDbMessage*> shown; // the rows that pass the search, for vim_nav's count
             shown.reserve(messages.size());
             std::string hay;
+            std::vector<std::pair<int, const CanDbMessage*>> scored; // fzf-style, as the signal search
             for (const CanDbMessage* m : messages)
             {
                 hay.clear();
-                std::format_to(std::back_inserter(hay), "0x{:03x} {}", m->raw_id, m->name);
-                if (needle.empty() || !std::ranges::search(hay, needle, {}, ascii_lower, ascii_lower).empty())
+                std::format_to(std::back_inserter(hay), "0x{:03x} {}", m->raw_id & can_id_mask_extended, m->name);
+                if (const int score = fuzzy_score(needle, hay); score >= 0)
                 {
-                    shown.push_back(m);
+                    scored.emplace_back(score, m);
                 }
+            }
+            // Best match first; equal scores (and an empty search) keep the database order.
+            std::ranges::stable_sort(scored, std::greater{}, &std::pair<int, const CanDbMessage*>::first);
+            for (const auto& [score, m] : scored)
+            {
+                shown.push_back(m);
             }
             // j/k/gg/G move the cursor (layout_msg) and select it alone; Enter adds it.
             const int count = static_cast<int>(shown.size());
@@ -392,7 +403,7 @@ void draw_available(App& app, TxGenerator& gen)
                 ImGui::TableHeadersRow();
                 for (const CanDbMessage* m : shown)
                 {
-                    const std::string id = std::format("0x{:03X}", m->raw_id);
+                    const std::string id = std::format("0x{:03X}", m->raw_id & can_id_mask_extended);
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     const bool selected = std::ranges::find(gen.avail_selected, m) != gen.avail_selected.end();
@@ -539,6 +550,7 @@ void draw_active(App& app, TxGenerator& gen, bool root_focused)
     constexpr ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
                                       | ImGuiTableFlags_Resizable;
     const float footer = gen.active_footer > 0.0f ? gen.active_footer : ImGui::GetFrameHeightWithSpacing();
+    const float table_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x; // for the details rows
     if (ImGui::BeginTable("##active", 7, flags, ImVec2(0.0f, -footer)))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -628,10 +640,7 @@ void draw_active(App& app, TxGenerator& gen, bool root_focused)
                     row.expanded = true; // its settings are there
                     row.rx_iface = row.rx_iface == UINT16_MAX ? row.msg.iface : row.rx_iface;
                 }
-                if (row.trigger == TxTrigger::Manual)
-                {
-                    row.enabled = false;
-                }
+                row.enabled = false; // a new trigger starts stopped, only RUN / ▶ send
                 gen.changed = true;
                 gen.rx_dirty = true;
             }
@@ -661,9 +670,21 @@ void draw_active(App& app, TxGenerator& gen, bool root_focused)
             }
             if (row.expanded)
             {
+                // The details span the whole row (tables have no column span): a child from the
+                // first cell to the table's right edge, with the cell clipping widened to match.
                 ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(2);
-                draw_row_details(app, gen, row);
+                ImGui::TableSetColumnIndex(0);
+                const ImVec2 at = ImGui::GetCursorScreenPos();
+                const float width = std::max(table_right - at.x - ImGui::GetStyle().CellPadding.x * 2.0f, 1.0f);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImGui::PushClipRect({at.x, dl->GetClipRectMin().y}, {at.x + width, dl->GetClipRectMax().y}, false);
+                if (ImGui::BeginChild("##details", {width, 0.0f}, ImGuiChildFlags_AutoResizeY,
+                                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground))
+                {
+                    draw_row_details(app, gen, row);
+                }
+                ImGui::EndChild();
+                ImGui::PopClipRect();
             }
             ImGui::PopID();
         }
@@ -677,7 +698,8 @@ void draw_active(App& app, TxGenerator& gen, bool root_focused)
         ImGui::OpenPopup("Edit Message###edit");
     }
     ImGui::SetNextWindowSize(ImVec2(750.0f * px, 480.0f * px), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Edit Message###edit"))
+    bool edit_open = true; // the title bar's X = Cancel
+    if (ImGui::BeginPopupModal("Edit Message###edit", &edit_open))
     {
         const bool valid = gen.edit_row >= 0 && gen.edit_row < static_cast<int>(gen.rows.size());
         if (valid)
@@ -696,7 +718,7 @@ void draw_active(App& app, TxGenerator& gen, bool root_focused)
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel") || !valid)
+        if (ImGui::Button("Cancel") || ImGui::Shortcut(ImGuiKey_Escape) || !valid)
         {
             ImGui::CloseCurrentPopup();
         }
@@ -782,7 +804,7 @@ void tx_signal_set(const CanDbSignal& sig, BusMessage& msg, double physical) noe
     can_signal_inject_physical(sig, msg, physical);
 }
 
-void tx_generator_on_rx(TxGenerator& gen, std::span<const BusMessage> msgs, TxClock::time_point now)
+void tx_generator_on_rx(TxGenerator& gen, std::span<const BusMessage> msgs, TxClock::time_point now, int64_t wall_now_ns)
 {
     if (msgs.empty())
     {
@@ -822,7 +844,15 @@ void tx_generator_on_rx(TxGenerator& gen, std::span<const BusMessage> msgs, TxCl
             if (row.enabled && !row.pending)
             {
                 row.pending = true;
-                row.next_due = now + std::chrono::milliseconds(row.delay_ms);
+                // The delay runs from reception, not from this UI frame (up to a frame later).
+                // An age beyond max_rx_age means the timestamp is not live (replayed file): ignore it.
+                std::chrono::nanoseconds age{wall_now_ns - m.ts_ns};
+                if (age < std::chrono::nanoseconds::zero() || age > max_rx_age)
+                {
+                    age = {};
+                }
+                row.next_due = now + std::chrono::milliseconds(row.delay_ms)
+                               - std::chrono::duration_cast<TxClock::duration>(age);
                 armed = true;
             }
         }

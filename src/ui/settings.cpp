@@ -19,7 +19,7 @@ namespace
 {
 
 constexpr int workspace_version = 2;
-constexpr std::string_view ini_type = "Cangaroo";
+constexpr std::string_view ini_type = "Kraken";
 
 constexpr std::string_view theme_names[] = {"system", "light", "dark"};
 
@@ -261,11 +261,11 @@ void settings_apply_theme(App& app)
 namespace
 {
 
-// <cangaroo-workspace> with <tabs> and <setup>; workspace_save adds <layout>.
+// <kraken-workspace> with <tabs> and <setup>; workspace_save adds <layout>.
 void workspace_xml(const App& app, pugi::xml_document& doc)
 {
-    pugi::xml_node root = doc.append_child("cangaroo-workspace");
-    root.append_attribute("cangaroo-version") = VERSION_STRING;
+    pugi::xml_node root = doc.append_child("kraken-workspace");
+    root.append_attribute("kraken-version") = VERSION_STRING;
     root.append_attribute("workspace-version") = workspace_version;
     pugi::xml_node tabs = root.append_child("tabs");
     for (const auto& tab : app.workspace.tabs)
@@ -285,8 +285,13 @@ void workspace_xml(const App& app, pugi::xml_document& doc)
         {
             instrument_panel_save_xml(ip->second, app.ifaces, el.append_child("instrumentpanel"));
         }
+        if (const auto tw = app.trace_windows.find(tab.uid); tw != app.trace_windows.end())
+        {
+            trace_window_save_xml(tw->second, app.ifaces, el.append_child("tracewindow"));
+        }
         graph_save_xml(tab.graphs, app.ifaces, el);
     }
+    gateway_save_xml(app.gateway, app.ifaces, root);
     pugi::xml_node setup = root.append_child("setup");
     setup_save_xml(app.setup, setup);
 }
@@ -311,7 +316,7 @@ bool workspace_save(App& app, const std::string& path)
 {
     pugi::xml_document doc;
     workspace_xml(app, doc);
-    pugi::xml_node root = doc.child("cangaroo-workspace");
+    pugi::xml_node root = doc.child("kraken-workspace");
     root.append_child("layout").append_child(pugi::node_cdata).set_value(
         settings_strip_ini(ImGui::SaveIniSettingsToMemory()).c_str());
     ImGui::GetIO().WantSaveIniSettings = true; // SaveIniSettingsToMemory cleared it
@@ -335,7 +340,7 @@ bool workspace_load(App& app, const std::string& path)
         log_error(std::format("Cannot load workspace file {}: {}", path, res.description()));
         return false;
     }
-    const pugi::xml_node root = doc.child("cangaroo-workspace");
+    const pugi::xml_node root = doc.child("kraken-workspace");
     if (!root)
     {
         log_error(std::format("Invalid workspace file format: {}", path));
@@ -356,6 +361,7 @@ bool workspace_load(App& app, const std::string& path)
     app.tx_generators.clear(); // joins their sender threads
     app.lin_controls.clear();
     app.instrument_panels.clear();
+    app.trace_windows.clear(); // the views rebuild from the trace
     const unsigned next_uid = ws.next_uid;
     for (const pugi::xml_node el : root.child("tabs").children("tab"))
     {
@@ -363,6 +369,10 @@ bool workspace_load(App& app, const std::string& path)
         const bool dup = std::ranges::any_of(ws.tabs, [uid](const WorkspaceTab& t) { return t.uid == uid; });
         WorkspaceTab& tab = workspace_add_tab(ws, el.attribute("title").as_string("Trace"), uid > 0 && !dup ? uid : 0);
         graph_load_xml(tab.graphs, app.setup, app.ifaces, el); // none in older workspaces: the default graph
+        if (const pugi::xml_node tw = el.child("tracewindow"); tw)
+        {
+            trace_window_load_xml(app.trace_windows[tab.uid], app.ifaces, tw);
+        }
         if (const pugi::xml_node gen = el.child("txgeneratorwindow"); gen)
         {
             tx_generator_load_xml(app.tx_generators[tab.uid], app.ifaces, gen); // ifaces enumerated by now
@@ -380,6 +390,7 @@ bool workspace_load(App& app, const std::string& path)
             instrument_panel_load_xml(panel, app.ifaces, ip);
         }
     }
+    gateway_load_xml(app.gateway, app.ifaces, root); // ifaces enumerated by now
     ws.next_uid = std::max(ws.next_uid, next_uid);
     ws.current = 0;
     // The dock nodes are cleared and rebuilt from here; tabs without a node get the default layout.
@@ -400,14 +411,14 @@ bool workspace_load(App& app, const std::string& path)
 void workspace_open_dialog(App& app)
 {
     file_dialog_open(app.settings.workspace_dialog, FileDialogMode::Open, "Open workspace configuration",
-                     app.settings.workspace_path, {{"Workspace config files", "*.cangaroo"}, {"All Files", "*"}});
+                     app.settings.workspace_path, {{"Workspace config files", "*.kraken"}, {"All Files", "*"}});
 }
 
 void workspace_save_dialog(App& app)
 {
-    // The dialog appends ".cangaroo" to a name without extension.
+    // The dialog appends ".kraken" to a name without extension.
     file_dialog_open(app.settings.workspace_dialog, FileDialogMode::Save, "Save workspace configuration",
-                     app.settings.workspace_path, {{"Workspace config files", "*.cangaroo"}});
+                     app.settings.workspace_path, {{"Workspace config files", "*.kraken"}});
 }
 
 void draw_workspace_dialog(App& app)

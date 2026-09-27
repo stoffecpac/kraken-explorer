@@ -1,6 +1,7 @@
 #include "ui/graph.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -9,6 +10,7 @@
 #include <numbers>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <implot.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <pugixml.hpp>
@@ -18,6 +20,7 @@
 #include "db/model/can_db.h"
 #include "db/model/lin_db.h"
 #include "core/stats.h"
+#include "ui/depth_gauge.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
 
@@ -151,10 +154,34 @@ void resolve_signals(GraphState& g, const Setup& setup)
     });
 }
 
-uint32_t next_color(const GraphState& g)
+} // namespace
+
+// The first colormap colour no signal uses yet, so a removal does not make the next one repeat a curve.
+uint32_t graph_next_color(const GraphState& g)
 {
+    const int n = ImPlot::GetColormapSize();
+    for (int k = 0; k < n; ++k)
+    {
+        const uint32_t c = ImGui::ColorConvertFloat4ToU32(ImPlot::GetColormapColor(k));
+        if (std::ranges::none_of(g.signals, [&](const GraphSignal& s) { return s.color == c; }))
+        {
+            return c;
+        }
+    }
     return ImGui::ColorConvertFloat4ToU32(ImPlot::GetColormapColor(static_cast<int>(g.signals.size())));
 }
+
+// Removes signal i and keeps the XY X signal pointing at the same signal.
+void graph_remove_signal(GraphState& g, std::size_t i)
+{
+    const int k = static_cast<int>(i);
+    g.signals.erase(g.signals.begin() + k);
+    g.x_signal -= k < g.x_signal ? 1 : 0;
+    g.slots_dirty = true;
+}
+
+namespace
+{
 
 // Checkbox that adds/removes one signal of the tree; `match` finds it in g.signals.
 template <class Match, class Make>
@@ -167,14 +194,14 @@ void signal_checkbox(GraphState& g, const char* label, Match match, Make make)
         if (on)
         {
             GraphSignal s = make();
-            s.color = next_color(g);
+            s.color = graph_next_color(g);
             g.signals.push_back(std::move(s));
+            g.slots_dirty = true;
         }
         else
         {
-            g.signals.erase(it);
+            graph_remove_signal(g, static_cast<std::size_t>(it - g.signals.begin()));
         }
-        g.slots_dirty = true;
     }
 }
 
@@ -240,7 +267,7 @@ void add_search_hit(GraphState& g, const Setup& setup, const SignalEntry& e)
         return;
     }
     GraphSignal s = e.can_sig != nullptr ? make_can_signal(net, e.raw_id, *e.can_msg, *e.can_sig) : make_lin_signal(net, id, *e.lin_frame, *e.lin_sig);
-    s.color = next_color(g);
+    s.color = graph_next_color(g);
     g.signals.push_back(std::move(s));
 }
 
@@ -358,10 +385,14 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
         update_cursor_values(g);
         ImGui::TextUnformatted(graph_delta_t_text(g.cursor_a, g.cursor_b).c_str());
     }
+    if (g.cursor_y_on)
+    {
+        ImGui::TextUnformatted(std::format("\u0394Y = {:.6g}  (Y1 {:.6g}, Y2 {:.6g})", g.cursor_y2 - g.cursor_y1, g.cursor_y1, g.cursor_y2).c_str());
+    }
     constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY
                                       | ImGuiTableFlags_SizingStretchProp;
     // Different ids per column count: ImGui keeps column state per table id.
-    const int columns = 3 + (g.cursor_on ? 2 : 0) + (g.statistics ? 4 : 0);
+    const int columns = 3 + (g.cursor_on ? 2 : 0) + (g.statistics ? 5 : 0);
     if (!ImGui::BeginTable(std::format("##active{}", columns).c_str(), columns, flags))
     {
         return;
@@ -385,6 +416,7 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
         ImGui::TableSetupColumn("Max", ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn("Mean", ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn("Median", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Std dev", ImGuiTableColumnFlags_WidthStretch, 1.2f);
     }
     ImGui::TableHeadersRow();
     int remove = -1;
@@ -483,18 +515,21 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
             // ponytail: recomputed when (x range, samples, newest t) changed, at most every 250 ms,
             // so a following window under a flood costs one O(visible points) pass per 250 ms,
             // not per frame. Incremental min/max/mean + a two-heap median if that is still too slow.
-            const std::array<double, 4> key{g.x_min, g.x_max, static_cast<double>(s.t.size()),
-                                            s.t.empty() ? 0.0 : s.t.back()};
+            // Between the cursors when they are on (MCUViewer's "select range"), else the visible window.
+            const double from = g.cursor_on ? std::min(g.cursor_a, g.cursor_b) : g.x_min;
+            const double to = g.cursor_on ? std::max(g.cursor_a, g.cursor_b) : g.x_max;
+            const std::array<double, 4> key{from, to, static_cast<double>(s.t.size()), s.t.empty() ? 0.0 : s.t.back()};
             if (const double now = wall_seconds(); key != s.stats_key && now - s.stats_wall >= 0.25)
             {
                 static std::vector<double> scratch; // main thread only, reused so it stops growing
-                const auto lo = std::lower_bound(s.t.begin(), s.t.end(), g.x_min);
-                const auto hi = std::upper_bound(lo, s.t.end(), g.x_max);
+                const auto lo = std::lower_bound(s.t.begin(), s.t.end(), from);
+                const auto hi = std::upper_bound(lo, s.t.end(), to);
                 const auto first = s.v.begin() + (lo - s.t.begin());
                 scratch.assign(first, first + (hi - lo));
                 const Stats st = stats_of(scratch);
                 const double nan = std::numeric_limits<double>::quiet_NaN();
-                s.stats = scratch.empty() ? std::array{nan, nan, nan, nan} : std::array{st.min, st.max, st.mean, st.median};
+                s.stats = scratch.empty() ? std::array{nan, nan, nan, nan, nan}
+                                          : std::array{st.min, st.max, st.mean, st.median, st.stddev};
                 s.stats_key = key;
                 s.stats_wall = now;
             }
@@ -509,9 +544,7 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
     ImGui::EndTable();
     if (remove >= 0)
     {
-        g.signals.erase(g.signals.begin() + remove);
-        g.x_signal -= remove < g.x_signal ? 1 : 0;
-        g.slots_dirty = true;
+        graph_remove_signal(g, static_cast<std::size_t>(remove));
     }
 }
 
@@ -544,10 +577,20 @@ std::pair<std::span<const double>, std::span<const double>> stride(GraphState& g
     return {g.stride_t, g.stride_v};
 }
 
+// The user pans or zooms the current plot (not by dragging a cursor): stop following the newest data.
+void stop_follow_on_user_zoom(GraphState& g, bool cursor_held)
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    if (ImPlot::IsPlotHovered() && !cursor_held
+        && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right) || io.MouseWheel != 0.0f))
+    {
+        g.follow = false;
+    }
+}
+
 // Y signals against the X signal over the time window, e.g. lat/lon track or RPM vs speed.
 void draw_xy(App& app, GraphState& g)
 {
-    follow_window(app, g);
     if (g.signals.size() < 2)
     {
         ImGui::TextDisabled("XY needs two signals: pick one as X in the Axis column, the others are Y.");
@@ -569,7 +612,10 @@ void draw_xy(App& app, GraphState& g)
         return;
     }
     const std::string x_label = with_unit(xs);
-    ImPlot::SetupAxes(x_label.c_str(), y_label.c_str(), ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+    // Fit while following; a zoom or pan stops following (Reset Zoom resumes), as in the time series.
+    const ImPlotAxisFlags fit = g.follow ? ImPlotAxisFlags_AutoFit : ImPlotAxisFlags_None;
+    ImPlot::SetupAxes(x_label.c_str(), y_label.c_str(), fit, fit);
+    stop_follow_on_user_zoom(g, false);
     const float px = ImGui::GetFontSize() / 15.0f;
     update_cursor_values(g);
     for (std::size_t i = 0; i < g.signals.size(); ++i)
@@ -593,9 +639,12 @@ void draw_xy(App& app, GraphState& g)
         spec.FillColor = color;
         spec.LineWeight = 2.0f * px;
         ImPlot::PlotLine(label.c_str(), g.scratch_t.data(), g.scratch_v.data(), n, spec);
-        spec.Marker = ImPlotMarker_Circle; // the latest point
-        spec.MarkerSize = 5.0f * px;
-        ImPlot::PlotScatter(label.c_str(), &g.scratch_t.back(), &g.scratch_v.back(), 1, spec);
+        spec.Marker = ImPlotMarker_Circle;
+        if (g.dots) // the latest point
+        {
+            spec.MarkerSize = 5.0f * px;
+            ImPlot::PlotScatter(label.c_str(), &g.scratch_t.back(), &g.scratch_v.back(), 1, spec);
+        }
         for (int k = 0; g.cursor_on && k < 2; ++k) // the curve's point at cursor time A / B
         {
             const double x = xs.at_cursor[static_cast<std::size_t>(k)];
@@ -616,7 +665,6 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
 {
     const int slot_count = slots.empty() ? 1 : *std::max_element(slots.begin(), slots.end()) + 1;
     const int rows = (slot_count + graph_axes_per_plot - 1) / graph_axes_per_plot;
-    follow_window(app, g);
     update_cursor_values(g);
 
     // Title of a subplot: the units on it, as the screenshot's per-plot titles.
@@ -697,8 +745,11 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
             ImPlotSpec spec;
             spec.LineColor = color;
             spec.FillColor = color;
-            spec.Marker = ImPlotMarker_Circle;
-            spec.MarkerSize = 2.5f * px;
+            if (g.dots)
+            {
+                spec.Marker = ImPlotMarker_Circle;
+                spec.MarkerSize = 2.5f * px;
+            }
             spec.LineWeight = 2.5f * px;
             const std::string label = std::format("{}##{}", s.name, i);
             ImPlot::PlotLine(label.c_str(), g.scratch_t.data(), g.scratch_v.data(), static_cast<int>(g.scratch_t.size()), spec);
@@ -743,6 +794,13 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
             accept(slot_count);
         }
 
+        if (g.place_cursor_y && row == 0)
+        {
+            const ImPlotRange y = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1).Y;
+            g.cursor_y1 = y.Min + y.Size() / 3.0;
+            g.cursor_y2 = y.Min + y.Size() * 2.0 / 3.0;
+            g.place_cursor_y = false;
+        }
         bool cursor_held = false;
         for (int k = 0; g.cursor_on && k < 2; ++k)
         {
@@ -750,6 +808,15 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
             bool held = false;
             ImPlot::DragLineX(k, &x, cursor_color(k), 1.5f, ImPlotDragToolFlags_None, nullptr, nullptr, &held);
             ImPlot::TagX(x, cursor_color(k), "%s %.3f s", k == 0 ? "A" : "B", x);
+            cursor_held |= held;
+        }
+        for (int k = 0; g.cursor_y_on && row == 0 && k < 2; ++k)
+        {
+            double& y = k == 0 ? g.cursor_y1 : g.cursor_y2;
+            bool held = false;
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+            ImPlot::DragLineY(2 + k, &y, cursor_color(k), 1.5f, ImPlotDragToolFlags_None, nullptr, nullptr, &held);
+            ImPlot::TagY(y, cursor_color(k), "%s %.6g", k == 0 ? "Y1" : "Y2", y);
             cursor_held |= held;
         }
         const ImGuiIO& io = ImGui::GetIO();
@@ -766,12 +833,7 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
                 }
             }
         }
-        if (ImPlot::IsPlotHovered() && !cursor_held
-            && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)
-                || io.MouseWheel != 0.0f))
-        {
-            g.follow = false; // the user pans or zooms: stop following the newest data
-        }
+        stop_follow_on_user_zoom(g, cursor_held);
     };
 
     const ImVec2 size = ImGui::GetContentRegionAvail();
@@ -846,7 +908,7 @@ void draw_text_card(const GraphSignal& s)
 {
     const float font = ImGui::GetFontSize();
     ImGui::PushStyleColor(ImGuiCol_Border, s.color);
-    if (ImGui::BeginChild("##card", ImVec2(0.0f, font * 5.0f), ImGuiChildFlags_Borders))
+    if (ImGui::BeginChild("##card", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY))
     {
         ImGui::TextDisabled("%s", s.parent.c_str());
         ImGui::TextUnformatted(s.name.c_str());
@@ -862,18 +924,15 @@ void draw_text_card(const GraphSignal& s)
     ImGui::PopStyleColor();
 }
 
-// 240 degree arc, gap at the bottom; DBC min/max, or the seen range when the DBC has none.
+// Porthole dial as the instrument panel's gauge, with the signal's colour as the water line up to
+// the needle. DBC min/max, or the seen range when the DBC has none. Text grows with the dial.
 void draw_gauge(const GraphSignal& s)
 {
     const float font = ImGui::GetFontSize();
     const float w = ImGui::GetContentRegionAvail().x;
-    const float r = std::clamp(w * 0.4f, font * 2.0f, font * 10.0f);
-    const float thick = std::max(4.0f, r * 0.12f);
+    const float r = std::clamp(w * 0.42f, font * 3.0f, font * 14.0f);
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const ImVec2 c(p.x + w * 0.5f, p.y + r + thick);
-    constexpr float pi = std::numbers::pi_v<float>;
-    constexpr float a0 = pi * 5.0f / 6.0f;
-    constexpr float a1 = a0 + pi * 4.0f / 3.0f;
+    const ImVec2 c(p.x + w * 0.5f, p.y + r + 4.0f);
     double lo = s.min;
     double hi = s.max;
     if (hi <= lo)
@@ -883,32 +942,40 @@ void draw_gauge(const GraphSignal& s)
     }
     const double v = s.v.empty() ? lo : s.v.back();
     const float frac = static_cast<float>(std::clamp((v - lo) / (hi - lo), 0.0, 1.0));
-    const float a = a0 + frac * (a1 - a0);
+    const float a = dial_start + frac * dial_span;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->PathArcTo(c, r, a0, a1, 48);
-    dl->PathStroke(ImGui::GetColorU32(ImGuiCol_FrameBg), ImDrawFlags_None, thick);
+    ImFont* face = ImGui::GetFont();
+    const auto text_at = [&](float size, float x_anchor, float align, float y, ImU32 col, const std::string& text)
+    {
+        const float tw = face->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x;
+        dl->AddText(face, size, ImVec2(x_anchor - tw * align, y), col, text.c_str());
+    };
+    dial_face(dl, c, r);
+    dial_ticks(dl, c, r, 0.80f);
     if (!s.v.empty())
     {
-        dl->PathArcTo(c, r, a0, a, 48);
-        dl->PathStroke(s.color, ImDrawFlags_None, thick);
-        dl->AddLine(c, ImVec2(c.x + std::cos(a) * r * 0.8f, c.y + std::sin(a) * r * 0.8f), ImGui::GetColorU32(ImGuiCol_Text), 2.0f);
+        dl->PathArcTo(c, r * 0.88f, dial_start, a, 48);
+        dl->PathStroke(s.color, ImDrawFlags_None, r * 0.08f);
+        dial_needle(dl, c, r * 0.78f, a, IM_COL32(0xe6, 0xf4, 0xf1, 255));
     }
-    dl->AddCircleFilled(c, thick * 0.4f, ImGui::GetColorU32(ImGuiCol_Text));
-    const auto centered = [&](float y, ImU32 col, const std::string& text)
-    {
-        const float tw = ImGui::CalcTextSize(text.c_str()).x;
-        dl->AddText(ImVec2(c.x - tw * 0.5f, y), col, text.c_str());
-    };
-    const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
-    const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-    centered(c.y + r * 0.35f, text, std::format("{} {}", graph_format_value(s, s.v.empty() ? std::nan("") : v), s.unit));
-    const float bottom = c.y + r * std::sin(a0) + thick;
-    dl->AddText(ImVec2(c.x + std::cos(a0) * r - font, bottom), dim, graph_format_value(s, lo).c_str());
-    const std::string hi_text = graph_format_value(s, hi);
-    dl->AddText(ImVec2(c.x + std::cos(a1) * r - ImGui::CalcTextSize(hi_text.c_str()).x + font, bottom), dim, hi_text.c_str());
-    centered(bottom + font * 1.2f, text, s.name);
-    ImGui::Dummy(ImVec2(w, bottom + font * 2.6f - p.y));
+    dl->AddCircleFilled(c, r * 0.08f, dial_brass);
+
+    // Value inside the dial below the centre, as wide as the dial allows.
+    const std::string value = std::format("{} {}", graph_format_value(s, s.v.empty() ? std::nan("") : v), s.unit);
+    const float value_w = std::max(face->CalcTextSizeA(font, FLT_MAX, 0.0f, value.c_str()).x, 1.0f);
+    // In the wedge under the scale's ends, where the needle never points.
+    const float value_size = std::max(font * 0.8f, std::min(r * 0.3f, font * r * 0.9f / value_w)); // readable on a small dial
+    text_at(value_size, c.x, 0.5f, c.y + r * 0.45f, IM_COL32_WHITE, value);
+
+    // Scale ends and name outside the dial, in the theme's text colours.
+    const float small = std::clamp(r * 0.16f, font, font * 1.6f);
+    const float name_size = std::clamp(r * 0.2f, font, font * 2.0f);
+    const float bottom = c.y + r * 0.82f;
+    text_at(small, c.x - r, 0.0f, bottom, ImGui::GetColorU32(ImGuiCol_TextDisabled), graph_format_value(s, lo));
+    text_at(small, c.x + r, 1.0f, bottom, ImGui::GetColorU32(ImGuiCol_TextDisabled), graph_format_value(s, hi));
+    text_at(name_size, c.x, 0.5f, c.y + r + small * 0.4f, ImGui::GetColorU32(ImGuiCol_Text), s.name);
+    ImGui::Dummy(ImVec2(w, c.y + r + small * 0.4f + name_size * 1.4f - p.y));
 }
 
 void draw_toolbar(App& app, GraphState& g)
@@ -974,6 +1041,10 @@ void draw_toolbar(App& app, GraphState& g)
 
 void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
 {
+    for (GraphSignal& s : g.signals) // palette colours follow a theme switch (dark ones vanish on light)
+    {
+        s.color = theme_signal_color_remap(s.color);
+    }
     const std::string title = g.id == 0 ? std::string("Graph") : std::format("Graph {}", g.id);
     const float px = ImGui::GetFontSize() / 15.0f;
     if (g.id != 0)
@@ -986,10 +1057,16 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
         wc.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge; // its own OS window
         ImGui::SetNextWindowClass(&wc);
     }
+    if (g.dock_into != 0)
+    {
+        ImGui::SetNextWindowDockID(g.dock_into, ImGuiCond_Always);
+        g.dock_into = 0;
+    }
     const bool visible = ImGui::Begin(workspace_window_name(tab, title.c_str()).c_str(), g.id == 0 ? nullptr : &g.open);
     if (visible)
     {
         draw_toolbar(app, g);
+        follow_window(app, g); // every view: the statistics use the window in Text / Gauge too
         if (ImGui::BeginChild("##side", ImVec2(280.0f * px, 0.0f), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders))
         {
             ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1029,10 +1106,23 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
             }
             ImGui::SetItemTooltip("Cursors A and B: drag them, or press a / b over the time series plot.\n"
                                   "XY shows each curve's point at the cursor times.");
+            ImGui::TextUnformatted("Y cursors:");
+            ImGui::SameLine(110.0f * px);
+            if (ImGui::Checkbox("##cursors_y", &g.cursor_y_on) && g.cursor_y_on)
+            {
+                g.place_cursor_y = true; // at 1/3 and 2/3 of the first plot's Y1 range, known while plotting
+            }
+            ImGui::SetItemTooltip("Horizontal cursors Y1 and Y2 on the first plot's left axis: drag them to read a level\n"
+                                  "and the difference between two levels.");
             ImGui::TextUnformatted("Statistics:");
             ImGui::SameLine(110.0f * px);
             ImGui::Checkbox("##statistics", &g.statistics);
-            const float button_h = ImGui::GetFrameHeightWithSpacing();
+            ImGui::SetItemTooltip("Min / max / mean / median / std dev per signal:\nbetween cursors A and B when they are on, else of the visible window.");
+            ImGui::TextUnformatted("Dots:");
+            ImGui::SameLine(110.0f * px);
+            ImGui::Checkbox("##dots", &g.dots);
+            ImGui::SetItemTooltip("Mark every sample on the curves");
+            const float button_h = ImGui::GetFrameHeightWithSpacing() * 2.0f; // CSV + PNG export
             if (ImGui::BeginChild("##list", ImVec2(0.0f, -button_h)))
             {
                 // After the tree: a checkbox there may have added or removed a signal this frame.
@@ -1226,9 +1316,7 @@ std::string graph_format_value(const GraphSignal& s, double v)
     {
         return "-";
     }
-    const SignalValueType type = s.kind == GraphSignalKind::Can && s.can_sig != nullptr ? s.can_sig->value_type : SignalValueType::integer;
-    const int digits = type == SignalValueType::float32 ? 7 : type == SignalValueType::float64 ? 15 : 6;
-    return std::format("{:.{}g}", v, digits);
+    return s.kind == GraphSignalKind::Can && s.can_sig != nullptr ? can_signal_format(*s.can_sig, v) : std::format("{:.6g}", v);
 }
 
 void graph_save_xml(std::span<const GraphState> graphs, const std::deque<Iface>& ifaces, pugi::xml_node tab)
@@ -1251,6 +1339,10 @@ void graph_save_xml(std::span<const GraphState> graphs, const std::deque<Iface>&
         el.append_attribute("cursor-a") = g.cursor_a; // seconds since the measurement's first frame
         el.append_attribute("cursor-b") = g.cursor_b;
         el.append_attribute("statistics") = g.statistics;
+        el.append_attribute("dots") = g.dots;
+        el.append_attribute("cursors-y") = g.cursor_y_on;
+        el.append_attribute("cursor-y1") = g.cursor_y1;
+        el.append_attribute("cursor-y2") = g.cursor_y2;
         for (const GraphSignal& s : g.signals)
         {
             pugi::xml_node se = el.append_child("signal");
@@ -1294,6 +1386,10 @@ void graph_load_xml(std::vector<GraphState>& graphs, const Setup& setup, const s
         g.cursor_a = el.attribute("cursor-a").as_double();
         g.cursor_b = el.attribute("cursor-b").as_double();
         g.statistics = el.attribute("statistics").as_bool();
+        g.dots = el.attribute("dots").as_bool(true);
+        g.cursor_y_on = el.attribute("cursors-y").as_bool();
+        g.cursor_y1 = el.attribute("cursor-y1").as_double();
+        g.cursor_y2 = el.attribute("cursor-y2").as_double();
         int x_signal = el.attribute("x-signal").as_int();
         int index = 0;
         for (const pugi::xml_node se : el.children("signal"))
@@ -1539,12 +1635,44 @@ void graph_ingest(GraphState& g, const App& app)
     }
 }
 
+namespace
+{
+
+// "+" after the last tab of the dock node that holds the docked "Graph": returns that node's id
+// when clicked. Drawn into the node's host window, which owns the tab bar.
+ImGuiID graph_tab_add_button(const App& app, const WorkspaceTab& tab)
+{
+    const ImGuiWindow* graph = ImGui::FindWindowByName(workspace_window_name(tab, "Graph").c_str());
+    const ImGuiDockNode* node = graph != nullptr ? graph->DockNode : nullptr;
+    if (node == nullptr || node->TabBar == nullptr || node->TabBar->Tabs.empty() || node->HostWindow == nullptr
+        || !node->HostWindow->WasActive)
+    {
+        return 0;
+    }
+    const ImGuiTabBar& bar = *node->TabBar;
+    const ImGuiTabItem& last = bar.Tabs.back();
+    const ImVec2 pos(bar.BarRect.Min.x + last.Offset + last.Width - bar.ScrollingAnim, bar.BarRect.Min.y);
+    ImGui::Begin(node->HostWindow->Name);
+    ImGui::PushClipRect(bar.BarRect.Min, bar.BarRect.Max, false);
+    ImGui::SetCursorScreenPos(pos);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    const bool clicked = ImGui::Button("+##graph_add", ImVec2(bar.BarRect.GetHeight(), bar.BarRect.GetHeight()));
+    ImGui::PopStyleColor();
+    ImGui::SetItemTooltip("New graph  %s", command_shortcut(app.menu, Command::NewGraphView));
+    ImGui::PopClipRect();
+    ImGui::End();
+    return clicked ? node->ID : 0;
+}
+
+} // namespace
+
 void draw_graph_windows(App& app, WorkspaceTab* current)
 {
     const bool view = menu_take(app.menu, Command::NewGraphView);
     const bool widget = menu_take(app.menu, Command::NewGraphWidget);
     const bool standalone = menu_take(app.menu, Command::StandaloneGraph);
-    if (current != nullptr && (view || widget || standalone))
+    const ImGuiID dock_into = current != nullptr ? graph_tab_add_button(app, *current) : 0;
+    if (current != nullptr && (view || widget || standalone || dock_into != 0))
     {
         unsigned id = 1;
         for (const auto& g : current->graphs)
@@ -1554,6 +1682,7 @@ void draw_graph_windows(App& app, WorkspaceTab* current)
         GraphState& g = current->graphs.emplace_back();
         g.id = id;
         g.standalone = standalone;
+        g.dock_into = dock_into;
     }
     for (auto& tab : app.workspace.tabs)
     {

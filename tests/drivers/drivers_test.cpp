@@ -327,6 +327,7 @@ TEST_CASE("SocketCAN read: one batched read returns at most max, the rest stays 
     Iface i;
     i.ops = &socketcan_driver;
     i.info.name = "vcan0";
+    i.info.details = "vcan"; // as enumerate: never `ip link set` (pkexec) the shared vcan
     REQUIRE(socketcan_driver.open(i, IfaceConfig{.driver = "SocketCAN", .name = "vcan0"}));
 
     const int peer = socket(PF_CAN, SOCK_RAW, CAN_RAW);

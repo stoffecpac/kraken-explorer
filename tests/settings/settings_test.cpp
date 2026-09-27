@@ -1,4 +1,4 @@
-// Settings in the ImGui ini ([Cangaroo][Settings]) and workspace .cangaroo v2 round trips.
+// Settings in the ImGui ini ([Kraken][Settings]) and workspace .kraken v2 round trips.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
@@ -17,7 +17,7 @@ namespace
 
 std::filesystem::path temp_dir()
 {
-    auto dir = std::filesystem::temp_directory_path() / "cangaroo_settings_test";
+    auto dir = std::filesystem::temp_directory_path() / "kraken_settings_test";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
@@ -28,7 +28,7 @@ void fill(App& app)
     app.settings.theme = ThemeMode::Dark;
     app.menu.canblaster = true;
     app.trace.max_size = 123456;
-    app.menu.recent_files = {"/a/one.cangaroo", "/b/two.cangaroo"};
+    app.menu.recent_files = {"/a/one.kraken", "/b/two.kraken"};
     app.recorder.config.folder = "/rec";
     app.recorder.config.file_name_pattern = "x_{date}";
     app.recorder.config.format = TraceFileFormat::PcapNg;
@@ -44,7 +44,7 @@ void check(const App& app)
     CHECK(app.settings.theme == ThemeMode::Dark);
     CHECK(app.menu.canblaster);
     CHECK(app.trace.max_size == 123456);
-    CHECK(app.menu.recent_files == std::vector<std::string>{"/a/one.cangaroo", "/b/two.cangaroo"});
+    CHECK(app.menu.recent_files == std::vector<std::string>{"/a/one.kraken", "/b/two.kraken"});
     CHECK(app.recorder.config.folder == "/rec");
     CHECK(app.recorder.config.file_name_pattern == "x_{date}");
     CHECK(app.recorder.config.format == TraceFileFormat::PcapNg);
@@ -110,9 +110,9 @@ TEST_CASE("malformed ini lines are ignored")
     CHECK(app.workspace.tabs.size() == 1);
 }
 
-TEST_CASE("strip removes only the Cangaroo sections")
+TEST_CASE("strip removes only the Kraken sections")
 {
-    const std::string ini = "[Window][A]\nPos=1,2\n\n[Cangaroo][Settings]\nui/theme=dark\n\n[Docking][Data]\nDockSpace ID=0x1\n";
+    const std::string ini = "[Window][A]\nPos=1,2\n\n[Kraken][Settings]\nui/theme=dark\n\n[Docking][Data]\nDockSpace ID=0x1\n";
     CHECK(settings_strip_ini(ini) == "[Window][A]\nPos=1,2\n\n[Docking][Data]\nDockSpace ID=0x1\n");
 }
 
@@ -153,7 +153,7 @@ constexpr const char* layout_ini = "[Window][Trace@3]\n"
 TEST_CASE("workspace v2 save + load")
 {
     const auto dir = temp_dir();
-    const std::string path = (dir / "ws.cangaroo").string();
+    const std::string path = (dir / "ws.kraken").string();
     ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable; // else [Docking] is neither read nor written
     {
@@ -175,7 +175,7 @@ TEST_CASE("workspace v2 save + load")
     const std::string xml((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     CHECK(xml.find("workspace-version=\"2\"") != std::string::npos);
     CHECK(xml.find("<layout>") != std::string::npos);
-    CHECK(xml.find("[Cangaroo]") == std::string::npos);
+    CHECK(xml.find("[Kraken]") == std::string::npos);
     CHECK(xml.find(layout_ini) != std::string::npos);
 
     ImGui::DestroyContext(); // the load must bring the layout back into a fresh context
@@ -203,15 +203,15 @@ TEST_CASE("workspace v2 save + load")
     CHECK(b.settings.workspace_path == path);
 
     // Save again after the load: byte-identical file (setup, tabs and layout ini).
-    const std::string path2 = (dir / "ws2.cangaroo").string();
+    const std::string path2 = (dir / "ws2.kraken").string();
     REQUIRE(workspace_save(b, path2));
     std::ifstream f2(path2);
     const std::string xml2((std::istreambuf_iterator<char>(f2)), std::istreambuf_iterator<char>());
     CHECK(xml2 == xml);
 
-    std::ofstream(dir / "v1.cangaroo") << "<cangaroo-workspace workspace-version=\"1\"><setup/></cangaroo-workspace>";
-    CHECK_FALSE(workspace_load(b, (dir / "v1.cangaroo").string()));
-    CHECK_FALSE(workspace_load(b, (dir / "missing.cangaroo").string()));
+    std::ofstream(dir / "v1.kraken") << "<kraken-workspace workspace-version=\"1\"><setup/></kraken-workspace>";
+    CHECK_FALSE(workspace_load(b, (dir / "v1.kraken").string()));
+    CHECK_FALSE(workspace_load(b, (dir / "missing.kraken").string()));
     CHECK(b.setup.networks.size() == 1); // untouched by the failed loads
     ImGui::DestroyContext();
 }
@@ -230,6 +230,10 @@ TEST_CASE("settings dialog: Cancel reverts the live theme and text size")
         ImGui::EndFrame();
         app.menu.pending.reset();
     };
+    frame(); // closed: the live theme is left alone (it was reverted to the defaults every frame)
+    frame();
+    CHECK(app.settings.theme == ThemeMode::Light);
+    CHECK(app.settings.font_scale_pct == 110);
     app.menu.pending.set(static_cast<std::size_t>(Command::Settings));
     frame();
     frame();
@@ -249,6 +253,7 @@ TEST_CASE("settings dialog: Cancel reverts the live theme and text size")
     ImGui::NewFrame();
     CHECK_FALSE(ImGui::IsPopupOpen("Settings")); // needs a current window
     ImGui::EndFrame();
+
 }
 
 TEST_CASE("workspace dirty: tabs or setup differ from the snapshot")
@@ -298,10 +303,10 @@ TEST_CASE("workspace graphs: saved per tab, older workspaces without <graph> loa
         g.view = GraphView::Gauge;
         g.statistics = true;
         a.workspace.tabs[1].graphs.emplace_back().id = 2;
-        REQUIRE(workspace_save(a, (dir / "g.cangaroo").string()));
+        REQUIRE(workspace_save(a, (dir / "g.kraken").string()));
     }
     App b;
-    REQUIRE(workspace_load(b, (dir / "g.cangaroo").string()));
+    REQUIRE(workspace_load(b, (dir / "g.kraken").string()));
     REQUIRE(b.workspace.tabs.size() == 2);
     CHECK(b.workspace.tabs[0].graphs.empty());
     REQUIRE(b.workspace.tabs[1].graphs.size() == 2);
@@ -309,10 +314,10 @@ TEST_CASE("workspace graphs: saved per tab, older workspaces without <graph> loa
     CHECK(b.workspace.tabs[1].graphs[0].statistics);
     CHECK(b.workspace.tabs[1].graphs[1].id == 2);
 
-    std::ofstream(dir / "old.cangaroo") << "<cangaroo-workspace workspace-version=\"2\"><tabs><tab title=\"Old\" uid=\"4\"/>"
-                                           "</tabs><setup/></cangaroo-workspace>";
+    std::ofstream(dir / "old.kraken") << "<kraken-workspace workspace-version=\"2\"><tabs><tab title=\"Old\" uid=\"4\"/>"
+                                           "</tabs><setup/></kraken-workspace>";
     App c;
-    REQUIRE(workspace_load(c, (dir / "old.cangaroo").string()));
+    REQUIRE(workspace_load(c, (dir / "old.kraken").string()));
     REQUIRE(c.workspace.tabs.size() == 1);
     CHECK(c.workspace.tabs[0].title == "Old");
     CHECK(c.workspace.tabs[0].graphs.empty()); // the frame adds the default graph, as before

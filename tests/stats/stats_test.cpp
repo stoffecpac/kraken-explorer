@@ -14,6 +14,9 @@ TEST_CASE("odd count: middle element")
     CHECK(s.max == 9.0);
     CHECK(s.mean == doctest::Approx(5.0));
     CHECK(s.median == 5.0);
+    CHECK(s.stddev == doctest::Approx(2.8284271)); // sqrt((16 + 16 + 0 + 4 + 4) / 5)
+    std::vector<double> flat{2.0, 2.0, 2.0};
+    CHECK(stats_of(flat).stddev == 0.0);
 }
 
 TEST_CASE("even count: mean of the two middle elements")

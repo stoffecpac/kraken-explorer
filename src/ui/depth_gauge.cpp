@@ -75,7 +75,10 @@ void draw_dial(ImDrawList* dl, ImVec2 c, float r, float fraction, bool sweeping)
 
 void dial_face(ImDrawList* dl, ImVec2 c, float r)
 {
-    dl->AddCircleFilled(c, r, IM_COL32(0x06, 0x14, 0x18, 255), 48);
+    // Deep water: darker toward the rim.
+    dl->AddCircleFilled(c, r, IM_COL32(0x03, 0x0c, 0x10, 255), 48);
+    dl->AddCircleFilled(c, r * 0.8f, IM_COL32(0x05, 0x15, 0x1a, 255), 48);
+    dl->AddCircleFilled(c, r * 0.55f, IM_COL32(0x08, 0x20, 0x27, 255), 48);
 }
 
 void dial_ticks(ImDrawList* dl, ImVec2 c, float r, float outer)
@@ -86,13 +89,33 @@ void dial_ticks(ImDrawList* dl, ImVec2 c, float r, float outer)
         const float inner = outer - (i % 5 == 0 ? 0.23f : 0.13f);
         dl->AddLine({c.x + std::cos(a) * r * inner, c.y + std::sin(a) * r * inner},
                     {c.x + std::cos(a) * r * outer, c.y + std::sin(a) * r * outer},
-                    ImGui::GetColorU32(ImGuiCol_Text, 0.7f), 1.5f);
+                    IM_COL32(0xe6, 0xf4, 0xf1, 0xb0), 1.5f); // the face is dark in both themes
     }
 }
 
 void dial_bezel(ImDrawList* dl, ImVec2 c, float r, float thickness)
 {
+    // Porthole: brass ring with a shadowed inner edge and eight bolts.
+    constexpr ImU32 shadow = IM_COL32(0x7a, 0x56, 0x1e, 255);
     dl->AddCircle(c, r, dial_brass, 48, thickness);
+    dl->AddCircle(c, r - thickness * 0.5f, shadow, 48, std::max(1.0f, thickness * 0.25f));
+    if (thickness >= 4.0f) // bolts are noise on a small dial
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            const float a = (static_cast<float>(i) + 0.5f) * std::numbers::pi_v<float> / 4.0f;
+            dl->AddCircleFilled({c.x + std::cos(a) * r, c.y + std::sin(a) * r}, thickness * 0.28f, shadow, 8);
+        }
+    }
+}
+
+void dial_needle(ImDrawList* dl, ImVec2 c, float r, float angle, ImU32 col)
+{
+    const ImVec2 dir{std::cos(angle), std::sin(angle)};
+    const float hw = std::max(1.5f, r * 0.035f);
+    dl->AddTriangleFilled({c.x - dir.y * hw, c.y + dir.x * hw}, {c.x + dir.y * hw, c.y - dir.x * hw},
+                          {c.x + dir.x * r, c.y + dir.y * r}, col);
+    dl->AddLine(c, {c.x - dir.x * r * 0.18f, c.y - dir.y * r * 0.18f}, col, hw * 2.0f); // counterweight
 }
 
 float depth_m(float fraction)

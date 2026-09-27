@@ -2,20 +2,20 @@
   Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "trace_line_format.h"
@@ -120,7 +120,10 @@ void append_asc_line(std::string& out, const BusMessage& m, int64_t start_ns, in
 
     std::format_to(it, "{:11.6f} {}  {:<15} {}   {} {} ", t, channel, id_hex, dir,
                    has_flag(m, bus_flag::rtr) ? 'r' : 'd', m.len);
-    append_asc_data(out, m);
+    if (!has_flag(m, bus_flag::rtr)) // a remote frame's length is the DLC it requests, it carries no data
+    {
+        append_asc_data(out, m);
+    }
     std::format_to(it, "  Length = 0 BitCount = 0 ID = {}{}", m.id, x);
 }
 
@@ -212,7 +215,7 @@ bool parse_asc_canfd_line(std::span<const std::string_view> parts, BusMessage& m
     {
         data_idx = idx + 4;
     }
-    // Legacy cangaroo layout: flags, two reserved zeros, then the byte count twice.
+    // Legacy layout: flags, two reserved zeros, then the byte count twice.
     else if (parts.size() >= idx + 5 && parts[idx + 1] == "0" && parts[idx + 2] == "0"
              && len_ok && parse_number(parts[idx + 4], len_again) && len_again == len)
     {

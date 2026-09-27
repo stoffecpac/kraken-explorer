@@ -1,12 +1,12 @@
 # Every ui/*.cpp belongs to this library, so new windows only have to add their file.
 file(GLOB ui_sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-add_library(cangaroo_ui STATIC ${ui_sources})
-target_include_directories(cangaroo_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..) # #include "ui/theme.h"
-target_link_libraries(cangaroo_ui PUBLIC imgui implot) # ui/graph.cpp
-target_link_libraries(cangaroo_ui PUBLIC cangaroo_decoders) # ui/trace_window.cpp: UDS/J1939 tabs
+add_library(kraken_ui STATIC ${ui_sources})
+target_include_directories(kraken_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..) # #include "ui/theme.h"
+target_link_libraries(kraken_ui PUBLIC imgui implot) # ui/graph.cpp
+target_link_libraries(kraken_ui PUBLIC kraken_decoders) # ui/trace_window.cpp: UDS/J1939 tabs
 # ui/*.cpp that draw from App& (main_menu.cpp, windows) need everything app.h includes.
-target_link_libraries(cangaroo_ui PUBLIC cangaroo_core cangaroo_tasks cangaroo_setup)
-target_link_libraries(cangaroo_ui PUBLIC cangaroo_drivers) # ui/setup_dialog.cpp: ifaces_find, ifaces_default_setup
+target_link_libraries(kraken_ui PUBLIC kraken_core kraken_tasks kraken_setup)
+target_link_libraries(kraken_ui PUBLIC kraken_drivers) # ui/setup_dialog.cpp: ifaces_find, ifaces_default_setup
 
 # Fonts are embedded with imgui's binary_to_compressed_c (stb-compressed, u32 arrays).
 add_executable(binary_to_compressed_c ${imgui_SOURCE_DIR}/misc/fonts/binary_to_compressed_c.cpp)
@@ -20,8 +20,8 @@ foreach(font NotoSans NotoSansMono)
         VERBATIM)
     list(APPEND font_headers ${font_out}/${font}.h)
 endforeach()
-target_sources(cangaroo_ui PRIVATE ${font_headers})
-target_include_directories(cangaroo_ui PRIVATE ${font_out})
+target_sources(kraken_ui PRIVATE ${font_headers})
+target_include_directories(kraken_ui PRIVATE ${font_out})
 
 # Icons (ui/icons.cpp): SVGs embedded as raw strings, rasterised with nanosvg at start-up.
 # Order must match enum class Icon in ui/icons.h.
@@ -44,6 +44,6 @@ file(READ ${icon_dir}/kraken.svg svg_text)
 file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/icons/kraken_svg.inc
      CONTENT "const char* const kraken_svg = R\"svg(${svg_text})svg\";\n" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${icon_dir}/kraken.svg)
-target_include_directories(cangaroo_ui PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/icons)
-target_link_libraries(cangaroo_ui PRIVATE nanosvg)
-target_link_libraries(cangaroo_ui PUBLIC cangaroo_python) # ui/script_window.cpp: python_run & co
+target_include_directories(kraken_ui PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/icons)
+target_link_libraries(kraken_ui PRIVATE nanosvg)
+target_link_libraries(kraken_ui PUBLIC kraken_python) # ui/script_window.cpp: python_run & co

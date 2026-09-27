@@ -7,7 +7,7 @@ React to CAN message 0x10 and send a response 0x321.
 Usage: Paste into the Script window and click Run while a measurement is active.
 Responses go out on IFACE_NAME (default vcan0, first interface if absent).
 """
-import cangaroo
+import kraken
 
 TRIGGER_ID   = 0x010
 RESPONSE_ID  = 0x321
@@ -15,12 +15,12 @@ IFACE_NAME = "vcan0"         # TX interface; first interface if absent
 
 def find_iface(name):
     """Id of the interface called `name`, else the first one in the measurement."""
-    ifaces = cangaroo.interfaces()
+    ifaces = kraken.interfaces()
     if not ifaces:
         raise RuntimeError("No interfaces in the measurement: add one in Setup and start the measurement")
     return next((i["id"] for i in ifaces if i["name"] == name), ifaces[0]["id"])
 
-for iface in cangaroo.interfaces():
+for iface in kraken.interfaces():
     print(f"Interface {iface['id']}: {iface['name']}")
 
 INTERFACE_ID = find_iface(IFACE_NAME)
@@ -37,10 +37,10 @@ def on_message(msg):
     data = msg.get_data()
     byte0 = data[0] if len(data) > 0 else 0x00
 
-    resp = cangaroo.Message()
+    resp = kraken.Message()
     resp.id = RESPONSE_ID
     resp.set_data(bytes([byte0, counter & 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
-    cangaroo.send(resp, interface_id=INTERFACE_ID)
+    kraken.send(resp, interface_id=INTERFACE_ID)
 
     print(f"RX  0x{msg.id:03X}  [{msg.dlc}]  {data.hex(' ')}")
     print(f"TX  0x{resp.id:03X}  [{resp.dlc}]  byte0=0x{byte0:02X}  counter={counter}")
@@ -51,5 +51,5 @@ def on_message(msg):
 print(f"Listening for 0x{TRIGGER_ID:03X}, responding with 0x{RESPONSE_ID:03X}...\n")
 
 while True:
-    for msg in cangaroo.receive(timeout=1.0):
+    for msg in kraken.receive(timeout=1.0):
         on_message(msg)

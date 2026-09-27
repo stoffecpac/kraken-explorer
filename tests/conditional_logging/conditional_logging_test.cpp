@@ -100,7 +100,7 @@ TEST_CASE("CSV: opened on the rising edge with header + pre-buffer, closed on th
 {
     const Setup setup = make_setup();
     const CanDbSignal* speed = signal(setup, "Speed");
-    const auto path = std::filesystem::temp_directory_path() / ("cangaroo_cl_" + std::to_string(getpid()) + ".csv");
+    const auto path = std::filesystem::temp_directory_path() / ("kraken_cl_" + std::to_string(getpid()) + ".csv");
     std::filesystem::remove(path);
 
     ConditionalLogging cl;

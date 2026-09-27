@@ -16,7 +16,7 @@ enum class ThemeMode
 };
 
 // Application settings (the old QSettings keys) and the workspace file. Settings live in the
-// ImGui .ini under $XDG_CONFIG_HOME/kraken-explorer/, in one "[Cangaroo][Settings]" section next to
+// ImGui .ini under $XDG_CONFIG_HOME/kraken-explorer/, in one "[Kraken][Settings]" section next to
 // the layout. Keys keep the old QSettings names (ui/theme, recording/folder, ...). State that
 // already has an owner (menu.recent_files, menu.canblaster, recorder.config, workspace tabs)
 // is read and written in place; only settings without another home are fields here.
@@ -27,7 +27,7 @@ struct Settings
     bool os_dark = false;                // desktop preference, queried once at start
 
     std::string ini_path;       // empty = nothing is persisted
-    std::string workspace_path; // current .cangaroo file, empty = never saved
+    std::string workspace_path; // current .kraken file, empty = never saved
     std::string pending_open;   // workspace to load before the next frame (app_before_frame)
     FileDialog workspace_dialog; // Open / Save As; its mode tells which
     std::string saved_snapshot; // workspace_snapshot() at the last save / load; empty = not taken yet
@@ -47,13 +47,13 @@ void settings_save(App& app);
 // Applies settings.theme (System follows the desktop) and settings.font_scale_pct. Also sets the platform-window tweaks.
 void settings_apply_theme(App& app);
 
-// The [Cangaroo][Settings] section body, one "key=value" per line (exposed for tests).
+// The [Kraken][Settings] section body, one "key=value" per line (exposed for tests).
 void settings_ini_write(const App& app, std::string& out);
 void settings_ini_read_line(App& app, std::string_view line);
-// `ini` without its [Cangaroo] sections: the layout part stored in a workspace.
+// `ini` without its [Kraken] sections: the layout part stored in a workspace.
 [[nodiscard]] std::string settings_strip_ini(std::string_view ini);
 
-// Workspace .cangaroo v2: <cangaroo-workspace workspace-version="2"> with <tabs> (per-tab
+// Workspace .kraken v2: <kraken-workspace workspace-version="2"> with <tabs> (per-tab
 // window settings go into each <tab>), <setup> and the ImGui layout ini in <layout>.
 // Version 1 (Qt) files are rejected. Callers stop the measurement before loading.
 bool workspace_save(App& app, const std::string& path);

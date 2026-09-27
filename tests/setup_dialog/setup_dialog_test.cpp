@@ -13,6 +13,7 @@
 #include "app.h"
 #include "ui/setup_dialog.h"
 #include "ui/theme.h"
+#include "ui_test.h"
 
 TEST_CASE("custom bitrate fields clamp Div+Seg1+Seg2 like the Qt page")
 {
@@ -110,7 +111,7 @@ void frame(App& app)
 
 TEST_CASE("LDF settings are applied to a LIN interface")
 {
-    const auto path = std::filesystem::temp_directory_path() / "cangaroo_setup_dialog_test.ldf";
+    const auto path = std::filesystem::temp_directory_path() / "kraken_setup_dialog_test.ldf";
     std::ofstream(path) << ldf_text;
     LinDb db;
     REQUIRE(lin_db_load(db, path.string()));
@@ -136,7 +137,7 @@ TEST_CASE("Add Interfaces hides interfaces already in any network")
 
 TEST_CASE("every page draws headless and edits only the copy")
 {
-    const auto path = std::filesystem::temp_directory_path() / "cangaroo_setup_dialog_draw.ldf";
+    const auto path = std::filesystem::temp_directory_path() / "kraken_setup_dialog_draw.ldf";
     std::ofstream(path) << ldf_text;
     auto db = std::make_shared<LinDb>();
     REQUIRE(lin_db_load(*db, path.string()));
@@ -198,4 +199,43 @@ TEST_CASE("every page draws headless and edits only the copy")
         CHECK(app.setup.networks[1].interfaces[0].lin_ldf_path.empty()); // not applied before OK
     }
     ImGui::DestroyContext();
+}
+
+TEST_CASE("a network name still being edited is not written into the next network selected")
+{
+    const UiTest ui;
+    App app;
+    app.setup.networks.push_back({.name = "engine"});
+    app.setup.networks.push_back({.name = "nav"});
+    auto& s = app.setup_dialog;
+    setup_dialog_open(app, s);
+    s.sel = SetupSel::Network;
+    s.net = 0;
+    frame(app);
+    frame(app);
+    ImGuiWindow* w = ImGui::FindWindowByName("Measurement Setup");
+    REQUIRE(w != nullptr);
+    ImGuiIO& io = ImGui::GetIO();
+    bool found = false; // the name field: the mouse shows the text cursor over it
+    for (float y = w->Pos.y + 4.0f; y < w->Pos.y + w->Size.y && !found; y += 4.0f)
+    {
+        io.AddMousePosEvent(w->Pos.x + w->Size.x - 40.0f, y);
+        frame(app);
+        found = ImGui::GetMouseCursor() == ImGuiMouseCursor_TextInput;
+    }
+    REQUIRE(found);
+    io.AddMouseButtonEvent(0, true);
+    frame(app);
+    io.AddMouseButtonEvent(0, false);
+    frame(app);
+    io.AddInputCharacter('X');
+    frame(app);
+    CHECK(s.work.networks[0].name == "engineX");
+
+    ImGui::ClearActiveID(); // what a click on "nav" in the tree does, in the frame it selects it
+    s.net = 1;
+    frame(app);
+    frame(app);
+    CHECK(s.work.networks[0].name == "engineX");
+    CHECK(s.work.networks[1].name == "nav");
 }

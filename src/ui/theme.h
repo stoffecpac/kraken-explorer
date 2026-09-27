@@ -11,7 +11,11 @@ struct ThemeFonts
     ImFont* mono = nullptr; // Noto Sans Mono, for hex/data columns
 };
 
-// Adds the embedded Noto Sans (default) and Noto Sans Mono to the ImGui font atlas.
+// U+1F991 squid: both fonts draw it from the kraken logo (no emoji font), in the text colour.
+inline constexpr unsigned theme_squid_codepoint = 0x1F991;
+
+// Adds the embedded Noto Sans (default, with Noto Sans Mono merged in for the symbols it lacks,
+// e.g. ≈) and Noto Sans Mono to the ImGui font atlas.
 // Call once after ImGui::CreateContext(), before the first frame.
 ThemeFonts theme_load_fonts(float size_px);
 
@@ -54,6 +58,8 @@ enum class ThemeText
 
 // Categorical colour i (ImU32, cycles through 8) of the theme's teal-first graph colormap.
 [[nodiscard]] unsigned theme_signal_color(unsigned i) noexcept;
+// A colour of either theme's signal palette -> the same slot in the current theme; others unchanged.
+[[nodiscard]] unsigned theme_signal_color_remap(unsigned color) noexcept;
 
 // The Kraken app icon (assets/kraken.svg) rasterised to size x size RGBA8. False if the SVG
 // fails to parse.

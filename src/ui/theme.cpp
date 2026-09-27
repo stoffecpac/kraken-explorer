@@ -1,11 +1,14 @@
 #include "ui/theme.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
+#include <imgui_internal.h> // ImFontLoader, atlas packing
 #include <implot.h>
 #include <nanosvg.h>
 #include <nanosvgrast.h>
@@ -22,13 +25,83 @@ static ImVec4 rgb(unsigned hex, float alpha = 1.0f)
     return c;
 }
 
+// A font source with one glyph, U+1F991 (squid), drawn from kraken.svg's alpha so it takes the text
+// colour: no colour-emoji font here, and stb_truetype could not render one anyway.
+static bool squid_contains(ImFontAtlas*, ImFontConfig*, ImWchar c)
+{
+    return c == theme_squid_codepoint;
+}
+
+static bool squid_load(ImFontAtlas* atlas, ImFontConfig* src, ImFontBaked* baked, void*, ImWchar c, ImFontGlyph* out_glyph, float* out_advance_x)
+{
+    if (c != theme_squid_codepoint)
+    {
+        return false;
+    }
+    const float size = baked->Size; // square, one em
+    if (out_advance_x != nullptr)
+    {
+        *out_advance_x = size;
+        return true;
+    }
+    const float density = src->RasterizerDensity * baked->RasterizerDensity;
+    const int px = std::max(1, static_cast<int>(size * density + 0.5f));
+    std::vector<unsigned char> rgba;
+    const ImFontAtlasRectId id = theme_app_icon(rgba, px) ? ImFontAtlasPackAddRect(atlas, px, px) : ImFontAtlasRectId_Invalid;
+    if (id == ImFontAtlasRectId_Invalid)
+    {
+        return false;
+    }
+    std::vector<unsigned char> alpha(static_cast<std::size_t>(px) * static_cast<std::size_t>(px));
+    for (std::size_t i = 0; i < alpha.size(); ++i)
+    {
+        alpha[i] = rgba[i * 4 + 3];
+    }
+    const float top = static_cast<float>(IM_ROUND(baked->Ascent)) - size * 0.85f; // sits on the baseline like a capital
+    *out_glyph = {};
+    out_glyph->Codepoint = c;
+    out_glyph->AdvanceX = size;
+    out_glyph->X0 = 0.0f;
+    out_glyph->Y0 = top;
+    out_glyph->X1 = static_cast<float>(px) / density;
+    out_glyph->Y1 = top + static_cast<float>(px) / density;
+    out_glyph->Visible = true;
+    out_glyph->PackId = id;
+    ImFontAtlasBakedSetFontGlyphBitmap(atlas, baked, src, out_glyph, ImFontAtlasPackGetRect(atlas, id), alpha.data(), ImTextureFormat_Alpha8, px);
+    return true;
+}
+
+static const ImFontLoader* squid_loader()
+{
+    static const ImFontLoader loader = []
+    {
+        ImFontLoader l;
+        l.Name = "kraken squid";
+        l.FontSrcContainsGlyph = squid_contains;
+        l.FontBakedLoadGlyph = squid_load;
+        return l;
+    }();
+    return &loader;
+}
+
 ThemeFonts theme_load_fonts(float size_px)
 {
     ImGuiIO& io = ImGui::GetIO();
-    return {
-        .ui = io.Fonts->AddFontFromMemoryCompressedTTF(NotoSans_compressed_data, NotoSans_compressed_size, size_px),
-        .mono = io.Fonts->AddFontFromMemoryCompressedTTF(NotoSansMono_compressed_data, NotoSansMono_compressed_size, size_px),
+    ImFontConfig merge;
+    merge.MergeMode = true;
+    const auto add_squid = [&]
+    {
+        ImFontConfig squid = merge;
+        squid.FontLoader = squid_loader();
+        io.Fonts->AddFont(&squid);
     };
+    ImFont* ui = io.Fonts->AddFontFromMemoryCompressedTTF(NotoSans_compressed_data, NotoSans_compressed_size, size_px);
+    // Noto Sans has no math operators (≈ U+2248 ...): Noto Sans Mono fills in what it lacks.
+    io.Fonts->AddFontFromMemoryCompressedTTF(NotoSansMono_compressed_data, NotoSansMono_compressed_size, size_px, &merge);
+    add_squid();
+    ImFont* mono = io.Fonts->AddFontFromMemoryCompressedTTF(NotoSansMono_compressed_data, NotoSansMono_compressed_size, size_px);
+    add_squid();
+    return {.ui = ui, .mono = mono};
 }
 
 // Both palettes fill every slot through one table so light/dark cannot drift apart.
@@ -42,7 +115,7 @@ struct Palette
 
 // "Abyss": deep blue-teal water, bioluminescent teal accent, sea-foam text.
 static constexpr Palette abyss = {
-    .text = 0xd8f3ef, .text_dim = 0x5e8a8f, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x0c262e,
+    .text = 0xd8f3ef, .text_dim = 0x6f9ca1, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x0c262e,
     .popup = 0x08191e, .frame = 0x10303a, .frame_hov = 0x16414d, .frame_act = 0x1b5260,
     .title = 0x08191e, .title_act = 0x0e2e36, .button = 0x123843, .border = 0x1e4a55,
     .grid = 0x143640, .accent = 0x19d3c5, .accent_hi = 0x5ff0e4, .select = 0x0f6b73,
@@ -52,12 +125,13 @@ static constexpr Palette abyss = {
     .text_error = 0xff7a59, .text_warn = 0xe0a84a,
 };
 
-// "Shallow water": pale sand and sea glass, same teal (darkened a step so it reads on white).
+// "Shallow water": pale sand and sea glass, the teal darkened until it reads on white: text_dim and
+// accent >= 4.5:1, border >= 3:1 on the popup / field colour (frames get a border here, see theme_apply).
 static constexpr Palette shallows = {
-    .text = 0x0b2a30, .text_dim = 0x7a8f8c, .bg = 0xf3eee2, .deep = 0xfdfbf6, .alt = 0xeef6f3,
+    .text = 0x0b2a30, .text_dim = 0x566865, .bg = 0xf3eee2, .deep = 0xfdfbf6, .alt = 0xeef6f3,
     .popup = 0xfdfbf6, .frame = 0xfdfbf6, .frame_hov = 0xdcf2ee, .frame_act = 0xbfe8e3,
-    .title = 0xe6dfcf, .title_act = 0xd6e9e4, .button = 0xe9f1ec, .border = 0xb3c6c1,
-    .grid = 0xd9e3df, .accent = 0x0fa3b1, .accent_hi = 0x0b7f8a, .select = 0x19d3c5,
+    .title = 0xe6dfcf, .title_act = 0xd6e9e4, .button = 0xe9f1ec, .border = 0x7d948f,
+    .grid = 0xd9e3df, .accent = 0x08727c, .accent_hi = 0x055860, .select = 0x19d3c5,
     .select_hov = 0x19d3c5,
     .kraken_button = {.fill = 0x0b6f79, .hover = 0x0e8591, .active = 0x085760, .border = 0xc08a2e, .text = 0xffffff},
     .stop_button = {.fill = 0xfdf3ee, .hover = 0xfbe0d6, .active = 0xf6c4b3, .border = 0xd4502f, .text = 0xb8401f},
@@ -138,7 +212,7 @@ static constexpr ImU32 abyss_map[] = {
     IM_COL32(0xff, 0x5c, 0x8a, 255), IM_COL32(0xb8, 0xf2, 0xff, 255),
 };
 static constexpr ImU32 shallows_map[] = {
-    IM_COL32(0x0f, 0xa3, 0xb1, 255), IM_COL32(0xe0, 0x5a, 0x38, 255), IM_COL32(0xc0, 0x8a, 0x10, 255),
+    IM_COL32(0x08, 0x72, 0x7c, 255), IM_COL32(0xe0, 0x5a, 0x38, 255), IM_COL32(0x94, 0x64, 0x00, 255),
     IM_COL32(0x2f, 0x6f, 0xd6, 255), IM_COL32(0x8a, 0x4f, 0xd8, 255), IM_COL32(0x4c, 0x9a, 0x2a, 255),
     IM_COL32(0xd6, 0x33, 0x6c, 255), IM_COL32(0x0b, 0x5f, 0x6a, 255),
 };
@@ -210,6 +284,18 @@ unsigned theme_signal_color(unsigned i) noexcept
     return (g_palette == &abyss ? abyss_map : shallows_map)[i % 8];
 }
 
+unsigned theme_signal_color_remap(unsigned color) noexcept
+{
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        if (color == abyss_map[i] || color == shallows_map[i])
+        {
+            return theme_signal_color(i);
+        }
+    }
+    return color;
+}
+
 void theme_apply(bool dark)
 {
     g_palette = dark ? &abyss : &shallows;
@@ -222,7 +308,7 @@ void theme_apply(bool dark)
     style.GrabRounding = 4.0f;
     style.TabRounding = 5.0f;
     // Flat: no frame around buttons and fields, a little more air (T79h, "looked like Qt").
-    style.FrameBorderSize = 0.0f;
+    style.FrameBorderSize = dark ? 0.0f : 1.0f; // light: field == popup colour, only the border shows it
     style.WindowBorderSize = 0.0f;
     style.ChildBorderSize = 1.0f;
     style.TabBarBorderSize = 0.0f;

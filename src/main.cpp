@@ -2,20 +2,20 @@
   Copyright (c) 2015, 2016 Hubert Denkmair <hubert@denkmair.de>
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "app.h"
 #include "core/log.h"
@@ -97,7 +97,7 @@ int main(int argc, char** argv)
     // --setup: open the measurement setup dialog right away.
     // --replay FILE: open a Replay View with FILE, autoplay on (plays with --measure).
     // --gateway: open the CAN Gateway window.
-    // --workspace FILE: load a .cangaroo workspace before anything starts.
+    // --workspace FILE: load a .kraken workspace before anything starts.
     // --script FILE: load a Python script into the script window and run it; under --smoke
     //   its console is printed to stderr at exit.
     long smoke_frames = -1;

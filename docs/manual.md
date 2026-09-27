@@ -2,25 +2,25 @@
 # <img src="../packaging/kraken-explorer.png" width="48" height="48"> Kraken Explorer: Day of the N2K Tentacle
 _"Deeper than a Peak. Wireshark is stuck in shallow waters."_
 
-**Open-source CAN / CAN FD / LIN / NMEA 2000 bus analyzer for Linux 🐧 / Windows 🪟**
+**Open-source CAN / CAN FD / LIN / NMEA 2000 bus analyzer for Linux 🐧**
 
-Based on [CANgaroo](https://github.com/Schildkroet/CANgaroo). Version 0.0.1.
+Version 0.0.1.
 
-**vs PCAN-Explorer:** the everyday PCAN-Explorer workflow (`.sym` symbol files, instrument panels, signal-based and triggered transmit, XY plots, cycle-time statistics), free, on Linux and Windows, with the adapters below.
+**vs PCAN-Explorer:** the everyday PCAN-Explorer workflow (`.sym` symbol files, instrument panels, signal-based and triggered transmit, XY plots, cycle-time statistics), free, on Linux, with the adapters below.
 
 **🔩 Supported Interfaces & Hardware:**
 
-| Interface | Linux | Windows | Notes |
-| :--- | :---: | :---: | :--- |
-| **SocketCAN** | ✅ | — | Any kernel CAN interface (`can0`, `vcan0`, …) |
-| **PEAK PCAN** | — | ✅ | PCAN-USB, PCAN-USB Pro, PCAN-PCIe, … via PCAN-Basic SDK (`-DCANGAROO_PEAKCAN=ON`). On Linux, PEAK devices work through SocketCAN |
-| **Kvaser** | ✅ | ✅ | USB/CAN Leaf and other Kvaser devices via CANlib SDK (`-DCANGAROO_KVASER=ON`) |
-| **Candlelight / CANable / CANnectivity** | ✅ | ✅ | gs_usb devices (CANable with Candlelight firmware, MKS CANable, cantact, CANnectivity, …). Linux: via SocketCAN (`gs_usb` kernel driver). Windows: CandleAPI, multi-channel, CAN FD |
-| **SLCAN** | ✅ | ✅ | CANable (SLCAN firmware), WeAct, Arduino CAN shields |
-| **CANblaster** | ✅ | ✅ | UDP-based remote CAN via [CANblaster](https://github.com/OpenAutoDiagLabs/CANblaster) (enable in Measurement > Driver menu) |
-| **GrIP** | ✅ | ✅ | GrIP protocol (CAN, CAN FD, LIN, GPIO) |
-| **lin_usb (LindeAPI)** | ✅ | ✅ | USB LIN adapter (VID `0x1d50` / PID `0x606f`). Multi-channel. Master, slave, and monitor modes. Hardware LIN scheduling via LDF. |
-| **aio_usb (aiode)** | ✅ | ✅ | Digital I/O and analog inputs on the same USB adapter (VID `0x1d50` / PID `0x606f`), controlled from the GPIO Control window |
+| Interface | Notes |
+| :--- | :--- |
+| **SocketCAN** | Any kernel CAN interface (`can0`, `vcan0`, …) |
+| **PEAK PCAN** | PCAN-USB, PCAN-USB Pro, PCAN-PCIe, … through SocketCAN (`peak_usb` / `peak_pci` kernel drivers) |
+| **Kvaser** | USB/CAN Leaf and other Kvaser devices via CANlib SDK (`-DKRAKEN_KVASER=ON`) |
+| **Candlelight / CANable / CANnectivity** | gs_usb devices (CANable with Candlelight firmware, MKS CANable, cantact, CANnectivity, …). Via SocketCAN (`gs_usb` kernel driver) |
+| **SLCAN** | CANable (SLCAN firmware), WeAct, Arduino CAN shields |
+| **CANblaster** | UDP-based remote CAN via [CANblaster](https://github.com/OpenAutoDiagLabs/CANblaster) (enable in Measurement > Driver menu) |
+| **GrIP** | GrIP protocol (CAN, CAN FD, LIN, GPIO) |
+| **lin_usb (LindeAPI)** | USB LIN adapter (VID `0x1d50` / PID `0x606f`). Multi-channel. Master, slave, and monitor modes. Hardware LIN scheduling via LDF. |
+| **aio_usb (aiode)** | Digital I/O and analog inputs on the same USB adapter (VID `0x1d50` / PID `0x606f`), controlled from the GPIO Control window |
 
 ## ⚙️ Features
 
@@ -40,7 +40,7 @@ Based on [CANgaroo](https://github.com/Schildkroet/CANgaroo). Version 0.0.1.
 *   **SocketCAN link control**: The CAN Status view brings interfaces Up / Down (physical CAN with the bitrate from the setup), creates and deletes `vcan` interfaces, and **Auto-baud** scans a physical interface listen-only (1 Mbit/s down to 10 kbit/s), brings it up at the bitrate it finds and stores that in the setup.
 *   **Workspace**: Dear ImGui interface with docking, floating windows on multiple monitors, workspace tabs, Light/Dark theme, adjustable text size (Settings, 100–175 %) and an in-app file picker. Uses no CPU while idle.
 
-<br>![Cangaroo Trace View](view.png)<br>
+<br>![Kraken Explorer Trace View](view.png)<br>
 
 ## 🛠️ Building
 
@@ -70,10 +70,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 The binary is `build/src/kraken-explorer`. Settings live in `$XDG_CONFIG_HOME/kraken-explorer/kraken-explorer.ini`
-(`~/.config/kraken-explorer`), separate from CANgaroo's. Useful options:
+(`~/.config/kraken-explorer`). Useful options:
 
-* `-DCANGAROO_SANITIZE=ON` — AddressSanitizer + UndefinedBehaviorSanitizer build
-* `-DCANGAROO_TESTS=OFF` — skip the unit tests
+* `-DKRAKEN_SANITIZE=ON` — AddressSanitizer + UndefinedBehaviorSanitizer build
+* `-DKRAKEN_TESTS=OFF` — skip the unit tests
 * `-DGLFW_BUILD_X11=OFF -DGLFW_BUILD_WAYLAND=OFF` — headless build (CI, containers) without the
   X11/Wayland packages. Only building and `ctest` work there; the app can't open a window.
 
@@ -114,7 +114,7 @@ extra arguments, …) still asks for the admin password.
 
 Devices accessed directly via libusb (lin_usb / LindeAPI, aio_usb) need a udev rule so that regular users can open them without `sudo`.
 
-Create `/etc/udev/rules.d/99-cangaroo.rules`:
+Create `/etc/udev/rules.d/99-kraken-explorer.rules`:
 
 ```
 # gs_usb / Candlelight / CANable (gs_usb firmware)
@@ -131,31 +131,10 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 > **Note:** Your user must be in the `plugdev` group (`sudo usermod -aG plugdev $USER`, then log out and back in).
 
-### 🪟 Windows
-
-Build in an [MSYS2](https://www.msys2.org/) UCRT64 shell:
-
-```bash
-pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
-    mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
-    mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-pybind11
-cmake -S . -B build -G Ninja
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-USB devices (gs_usb, lin_usb, aio_usb) are opened through WinUSB; no libusb is needed.
-
 ### Optional hardware drivers
 
-**PEAK PCAN** (`-DCANGAROO_PEAKCAN=ON`) — Windows only:
-  1. Download [PCAN-Basic SDK](https://www.peak-system.com/fileadmin/media/files/PCAN-Basic.zip) and extract it to `src/drivers/pcan-basic-api/` (or pass `-DPCAN_BASIC_DIR=<path>`).
-  2. Configure with `cmake -B build -DCANGAROO_PEAKCAN=ON`.
-  3. Place `PCANBasic.dll` (from `pcan-basic-api/x64/`) next to the built `.exe`.
+**Kvaser** (`-DKRAKEN_KVASER=ON`):
 
-**Kvaser** (`-DCANGAROO_KVASER=ON`) — Linux and Windows:
-
-  *Linux:*
   1. Download and build [linuxcan](https://www.kvaser.com/downloads-kvaser/) (V5.51.461 or newer):
      ```bash
      tar -xf linuxcan.tar.gz
@@ -163,18 +142,14 @@ USB devices (gs_usb, lin_usb, aio_usb) are opened through WinUSB; no libusb is n
      sudo make -C linuxcan/canlib install
      sudo ldconfig
      ```
-  2. Configure with `cmake -B build -DCANGAROO_KVASER=ON`.
+  2. Configure with `cmake -B build -DKRAKEN_KVASER=ON`.
 
-  *Windows:*
-  1. Install the [Kvaser CANlib SDK](https://www.kvaser.com/downloads-kvaser/) (V5.51.461 or newer).
-  2. Configure with `cmake -B build -DCANGAROO_KVASER=ON -DCANLIB_DIR="C:/path/to/Kvaser/Canlib"` (or set the `CANLIB_DIR` environment variable).
-  3. Place `canlib32.dll` (from `Canlib/Bin/`) next to the built `.exe`.
 
 ## Reference adapter firmware
 
 [`firmware/STM32G4_TinyUSB_CanLinAio/`](../firmware/STM32G4_TinyUSB_CanLinAio/README.md)
 is a bare STM32CubeIDE project (STM32G473, TinyUSB) for building your own
-adapter. It implements the device side of all three USB interfaces CANgaroo
+adapter. It implements the device side of all three USB interfaces Kraken Explorer
 talks to: **gs_usb** (CAN / CAN FD), **lin_usb** (LIN) and **aio_usb** (I/O +
 analog). It contains only the USB transport. Plug your CAN, LIN and GPIO code
 into its weak `gs_engine_*`, `lin_engine_*` and `aio_hw_*` hooks. `SampleApp/`
@@ -194,7 +169,7 @@ canconvert TCU.arxml TCU.dbc
 
 ## 📥 Download
 
-Download the latest release from the [Releases](https://github.com/Schildkroet/CANgaroo).
+Download the latest release from the [Releases](https://github.com/stoffecpac/kraken-explorer/releases).
 
 ## 📜 Credits
 
@@ -203,9 +178,9 @@ Written by Hubert Denkmair <hubert@denkmair.de>
 Further development by:
 * Ethan Zonca <e@ethanzonca.com>
 * WeAct Studio
-* Schildkroet (https://github.com/Schildkroet/CANgaroo)
-* Wikilift (https://github.com/wikilift/CANgaroo)
-* Jayachandran Dharuman (https://github.com/OpenAutoDiagLabs/cangaroo)
+* Schildkroet (https://github.com/Schildkroet)
+* Wikilift (https://github.com/wikilift)
+* Jayachandran Dharuman (https://github.com/OpenAutoDiagLabs)
 
 ## DISCLAIMER
 

@@ -322,6 +322,48 @@ TEST_CASE("dragging a widget onto an occupied cell swaps them, the corner change
     CHECK(p.items[0].row_span == 16);
 }
 
+TEST_CASE("settle: no widget overlaps another or sticks out past the columns")
+{
+    const auto overlap = [](const Instrument& a, const Instrument& b)
+    {
+        return a.col < b.col + b.col_span && b.col < a.col + a.col_span && a.row < b.row + b.row_span && b.row < a.row + a.row_span;
+    };
+    // T87b a3 F2: the demo layout, 1x1 T1_Angle (2,3) dropped onto the 2x3 PackVoltage (2,0)..(3,2)
+    InstrumentPanel p;
+    p.columns = 6;
+    p.items = {{.kind = InstrumentKind::Gauge, .col = 2, .row = 0, .col_span = 2, .row_span = 3},
+               {.kind = InstrumentKind::Numeric, .col = 2, .row = 3},
+               {.kind = InstrumentKind::Numeric, .col = 3, .row = 3, .col_span = 2, .row_span = 2}};
+    instrument_panel_move(p, 1, 3, 2);
+    CHECK(p.items[1].col == 3);
+    CHECK(p.items[1].row == 2);
+    for (std::size_t i = 0; i < p.items.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < p.items.size(); ++j)
+        {
+            CHECK_FALSE(overlap(p.items[i], p.items[j]));
+        }
+    }
+    // resize over a neighbour: the resized one stays, the neighbour moves down
+    instrument_resize(p.items[1], 3, 1);
+    instrument_panel_settle(p, 1);
+    CHECK(p.items[1].col == 3);
+    CHECK(p.items[1].col_span == 3);
+    CHECK_FALSE(overlap(p.items[1], p.items[0]));
+    CHECK_FALSE(overlap(p.items[1], p.items[2]));
+    CHECK_FALSE(overlap(p.items[0], p.items[2]));
+    // fewer columns pull widgets back inside
+    p.columns = 2;
+    instrument_panel_settle(p);
+    for (const Instrument& inst : p.items)
+    {
+        CHECK(inst.col + inst.col_span <= 2);
+    }
+    CHECK_FALSE(overlap(p.items[0], p.items[1]));
+    CHECK_FALSE(overlap(p.items[0], p.items[2]));
+    CHECK_FALSE(overlap(p.items[1], p.items[2]));
+}
+
 TEST_CASE("gauge texts do not collide down to the smallest cell")
 {
     const auto overlap = [](const InstrumentRect& a, const InstrumentRect& b)
@@ -345,9 +387,13 @@ TEST_CASE("gauge texts do not collide down to the smallest cell")
         CHECK(g.cy - g.r >= 0.0f); // dial below the title line
         CHECK(g.cy + g.r <= h);
         CHECK(g.cx + g.r <= w);
-        CHECK(g.value_scale > 0.0f);
-        CHECK(far_dist(g.value, g.cx, g.cy) <= g.r); // value inside the dial
-        CHECK(g.value.y0 > g.cy);                    // below the centre
+        CHECK(g.value_scale >= std::min(0.8f, (w - 6.0f) / (8 * 8.25f))); // readable (GUI test F8)
+        CHECK(inside(g.value, w, h));
+        if (g.value.y0 < g.cy + g.r) // inside the dial, below the centre; else under the dial
+        {
+            CHECK(far_dist(g.value, g.cx, g.cy) <= g.r);
+            CHECK(g.value.y0 > g.cy);
+        }
         if (g.scale_labels)
         {
             CHECK(inside(g.lo, w, h));
@@ -360,7 +406,11 @@ TEST_CASE("gauge texts do not collide down to the smallest cell")
         }
     }
     CHECK(instrument_gauge_layout(600.0f, 400.0f, fs, 66.0f, 8.25f, 33.0f).scale_labels);
-    CHECK(instrument_gauge_layout(600.0f, 400.0f, fs, 66.0f, 8.25f, 33.0f).value_scale == 1.0f);
+    // The value grows with the dial; on a small one it moves under the dial at the UI size.
+    CHECK(instrument_gauge_layout(600.0f, 400.0f, fs, 66.0f, 8.25f, 33.0f).value_scale > 2.5f);
+    const GaugeLayout small = instrument_gauge_layout(60.0f, 66.0f, fs, 50.0f, 8.25f, 33.0f);
+    CHECK(small.value_scale == 1.0f);
+    CHECK(small.value.y0 >= small.cy + small.r);
 }
 
 TEST_CASE("the panel draws every widget kind headless")

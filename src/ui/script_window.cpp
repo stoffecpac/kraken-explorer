@@ -74,6 +74,7 @@ void draw_console(App& app, ScriptWindowState& s, ImVec2 size)
     PyState& py = app.python;
     ImGui::BeginChild("##console", size, ImGuiChildFlags_Borders);
     ImGui::PushFont(app.fonts.mono, 0.0f);
+    ImGui::PushTextWrapPos(0.0f); // long tracebacks wrap at the console's edge
     {
         const std::lock_guard lock(py.mutex); // the script's print() waits one draw
         for (const PyConsoleRun& run : py.console)
@@ -94,6 +95,7 @@ void draw_console(App& app, ScriptWindowState& s, ImVec2 size)
             ImGui::SetScrollHereY(1.0f);
         }
     }
+    ImGui::PopTextWrapPos();
     ImGui::PopFont();
     ImGui::EndChild();
 }
@@ -120,7 +122,7 @@ bool script_window_load_file(ScriptWindowState& s, const std::string& path)
 void script_window_run(App& app, ScriptWindowState& s)
 {
     reload_if_modified(s);
-    python_run(app, app.python, s.code);
+    python_run(app, app.python, s.code, s.file_path.empty() ? "<script>" : std::filesystem::path(s.file_path).filename().string());
 }
 
 void draw_script_window(App& app, ScriptWindowState& s, const WorkspaceTab& tab)

@@ -60,7 +60,7 @@ struct GraphSignal
     std::deque<std::pair<double, uint32_t>> load_window; // BusLoad: (t, bits) of the last second
     uint64_t load_bits = 0;
     double load_emitted = -1.0;
-    std::array<double, 4> stats{};       // Statistics column: min, max, mean, median of the window (NaN = none)
+    std::array<double, 5> stats{};       // Statistics columns: min, max, mean, median, std dev (NaN = none)
     std::array<double, 4> stats_key{0.0, 0.0, -1.0, 0.0}; // (x_min, x_max, samples, newest t) of `stats`
     double stats_wall = -1e9;            // wall_seconds() of the last recompute
     std::array<double, 3> at_cursor{};   // value at cursor A, at B, B - A (NaN = none); graph_cursor_values
@@ -72,6 +72,7 @@ struct GraphState
     unsigned id = 0;          // 0 = the docked default "Graph"; names "Graph <id>" otherwise
     bool open = true;
     bool standalone = false;  // own OS window (Window > Standalone Graph)
+    unsigned dock_into = 0;   // dock node to appear in as a tab ("+" beside the Graph tab), 0 = none
     GraphView view = GraphView::TimeSeries;
     int duration = 1;         // index into the duration combo (All, 1 min, ...)
     int columns = 2;          // text / gauge grid
@@ -95,7 +96,13 @@ struct GraphState
     bool cursor_on = false;   // "Cursors": drag lines A and B, value per signal at each and the difference
     double cursor_a = 0.0;    // seconds since start_ns, as the X axis
     double cursor_b = 0.0;
-    bool statistics = false;  // min / max / mean of the visible window per signal
+    bool statistics = false;  // min / max / mean / median / std dev per signal: between the cursors when they
+                              // are on, else of the visible window
+    bool cursor_y_on = false; // "Y cursors": horizontal drag lines 1 and 2 on the first plot's Y1 axis
+    double cursor_y1 = 0.0;
+    double cursor_y2 = 0.0;
+    bool place_cursor_y = false; // the checkbox was just ticked: put Y1 / Y2 into the visible range
+    bool dots = true;         // sample markers on the curves (XY: the latest point)
     int downsample = 1;       // keep every Nth sample before decimation
     std::vector<int> slots;   // graph_assign_slots(signals), recomputed when the signal set or an axis changes
     bool slots_dirty = true;
@@ -132,8 +139,12 @@ const std::array<double, 3>& graph_cursor_values(GraphSignal& s, double a, doubl
 // "Δt = 12.5 ms  (1/Δt = 80 Hz)" for cursors a and b; "-" as frequency when they coincide.
 [[nodiscard]] std::string graph_delta_t_text(double a, double b);
 
-// Value text: float32/float64 DBC signals with %g at their precision (7 / 15 digits), others %.6g; NaN = "-".
+// Value text: CAN signals at their resolution (can_signal_format), others %.6g; NaN = "-".
 [[nodiscard]] std::string graph_format_value(const GraphSignal& s, double v);
+// First colormap colour no signal of g uses (needs an ImPlot context).
+[[nodiscard]] uint32_t graph_next_color(const GraphState& g);
+// Removes signal i; the XY X signal keeps pointing at the same signal.
+void graph_remove_signal(GraphState& g, std::size_t i);
 
 // One <graph> child of the workspace <tab> per open graph: view settings and the signals by
 // name (network + message + signal, bus load by driver + interface), not their samples.

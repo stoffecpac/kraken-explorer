@@ -3,4 +3,4 @@ foreach(m core db decoders drivers ui)
 endforeach()
 
 add_executable(kraken-explorer main.cpp app.cpp)
-target_link_libraries(kraken-explorer PRIVATE imgui cangaroo_ui cangaroo_core cangaroo_tasks cangaroo_setup cangaroo_drivers)
+target_link_libraries(kraken-explorer PRIVATE imgui kraken_ui kraken_core kraken_tasks kraken_setup kraken_drivers)

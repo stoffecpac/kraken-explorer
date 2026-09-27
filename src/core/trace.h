@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -34,7 +35,9 @@ struct Trace
     return t.chunks[rel / trace_chunk_size][rel % trace_chunk_size];
 }
 
-// Every retained message, oldest first.
+// Every retained message, ordered by ts_ns (stable). The trace itself is in arrival order: a
+// frame of one interface can land a main-loop frame after a newer one of another (see
+// trace_append_sorted), and files / scripts want time order.
 [[nodiscard]] inline std::vector<BusMessage> trace_copy(const Trace& t)
 {
     std::vector<BusMessage> out;
@@ -43,6 +46,7 @@ struct Trace
     {
         out.push_back(trace_at(t, i));
     }
+    std::ranges::stable_sort(out, {}, &BusMessage::ts_ns);
     return out;
 }
 
@@ -71,7 +75,7 @@ void rx_deliver(Inbox& inbox, std::span<const RxConsumer> consumers, std::span<c
 
 // Main thread, once per frame: inbox_take every inbox into one batch, then
 // trace_append_sorted, so frames of different interfaces interleave by ts_ns. Ordering is
-// per frame only: a frame arriving a frame late is not moved back. batch is reused between
+// per frame only: a frame arriving a frame late is not moved back (trace_copy sorts). batch is reused between
 // frames so the steady state does not allocate.
 void inbox_take(Inbox& inbox, std::vector<BusMessage>& batch); // appends, keeps inbox capacity
 void trace_append_sorted(Trace& t, std::vector<BusMessage>& batch); // stable sort, append, clear

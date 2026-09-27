@@ -96,3 +96,6 @@ void file_dialog_sort(std::vector<FileEntry>& entries, FileSortColumn column, bo
 // Save target: dir / name, plus the extension of the first "*.ext" pattern when name has none.
 [[nodiscard]] std::filesystem::path file_dialog_save_path(const std::filesystem::path& dir, const std::string& name,
                                                           std::string_view patterns);
+// Save name after picking another file type: the extension becomes the type's first "*.ext"
+// ("trace.asc" + "*.candump *.log" -> "trace.candump"); unchanged for an all-files type.
+[[nodiscard]] std::string file_dialog_retype(const std::string& name, std::string_view patterns);

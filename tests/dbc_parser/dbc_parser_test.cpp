@@ -41,7 +41,7 @@ BU_: ECU_A ECU_B
 [[nodiscard]] bool parse(std::string_view body, CanDb& db, bool with_preamble = true,
                          std::vector<DbcError>* errors = nullptr)
 {
-    const auto path = std::filesystem::temp_directory_path() / "cangaroo_dbc_parser_test.dbc";
+    const auto path = std::filesystem::temp_directory_path() / "kraken_dbc_parser_test.dbc";
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (with_preamble)
@@ -97,6 +97,23 @@ TEST_CASE("parses signal attributes")
     CHECK(sig->unit == "degC");
     CHECK_FALSE(sig->is_unsigned);
     CHECK_FALSE(sig->big_endian);
+}
+
+TEST_CASE("exponents with e and E")
+{
+    CanDb db;
+    REQUIRE(parse(R"(BO_ 101 Nav: 8 ECU_A
+ SG_ Latitude : 0|32@1- (1e-07,0) [-90|90] "deg" ECU_B
+ SG_ Big : 32|16@1+ (2.5E+3,-1e2) [0|1.5e8] "" ECU_B
+)", db));
+    const CanDbSignal* lat = signal(db, 101, "Latitude");
+    REQUIRE(lat != nullptr);
+    CHECK(lat->factor == doctest::Approx(1e-7));
+    const CanDbSignal* big = signal(db, 101, "Big");
+    REQUIRE(big != nullptr);
+    CHECK(big->factor == doctest::Approx(2500.0));
+    CHECK(big->offset == doctest::Approx(-100.0));
+    CHECK(big->max == doctest::Approx(1.5e8));
 }
 
 // This is the conversion that issue #34 turned on. If it changes, the packing

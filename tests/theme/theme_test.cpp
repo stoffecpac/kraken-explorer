@@ -32,6 +32,20 @@ TEST_CASE("themes and embedded fonts")
     ImGui::PushFont(fonts.mono, 0.0f);
     CHECK(ImGui::CalcTextSize("i").x == doctest::Approx(ImGui::CalcTextSize("W").x));
     ImGui::PopFont();
+    // T87b: ≈ (U+2248, only in Noto Sans Mono) and the squid U+1F991 (no emoji font) were drawn as U+FFFD.
+    for (ImFont* f : {fonts.ui, fonts.mono})
+    {
+        ImFontBaked* baked = f->GetFontBaked(15.0f);
+        const ImFontGlyph* approx = baked->FindGlyphNoFallback(0x2248);
+        REQUIRE(approx != nullptr);
+        CHECK(approx->Visible);
+        const ImFontGlyph* squid = baked->FindGlyphNoFallback(0x1F991);
+        REQUIRE(squid != nullptr);
+        CHECK(squid->Visible);
+        CHECK(squid->AdvanceX == doctest::Approx(15.0f));
+        CHECK(baked->FindGlyphNoFallback(0x1F419) == nullptr); // octopus: still nobody's
+    }
+    CHECK(ImGui::CalcTextSize("\xF0\x9F\xA6\x91").x == doctest::Approx(15.0f)); // UTF-8 squid: one glyph, one em
     ImGui::EndFrame();
 
     const ImVec4* c = ImGui::GetStyle().Colors;
@@ -45,7 +59,7 @@ TEST_CASE("themes and embedded fonts")
     theme_apply(false);
     CHECK(is_rgb(c[ImGuiCol_WindowBg], 0xf3eee2));
     CHECK(is_rgb(c[ImGuiCol_Text], 0x0b2a30));
-    CHECK(is_rgb(c[ImGuiCol_TabSelectedOverline], 0x0fa3b1));
+    CHECK(is_rgb(c[ImGuiCol_TabSelectedOverline], 0x08727c));
     CHECK(ImGui::GetStyle().FrameRounding == 4.0f);
     CHECK(ImGui::GetStyle().DockingSeparatorSize == 4.0f);
     ImGui::DestroyContext();
@@ -104,6 +118,30 @@ TEST_CASE("status text colours follow the theme and stay readable")
         CHECK(theme_text(all[i]) != dark[i]);
         CHECK(contrast(theme_text(all[i]), light_bg) >= 3.0);
     }
-    CHECK(theme_signal_color(0) == theme_u32(0x0fa3b1));
+    CHECK(theme_signal_color(0) == theme_u32(0x08727c));
+    CHECK(theme_signal_color_remap(theme_u32(0x19d3c5)) == theme_u32(0x08727c)); // dark slot 0 -> light slot 0
+    CHECK(theme_signal_color_remap(0xFF4AA8E0u) == 0xFF4AA8E0u);                 // own colours stay
+
+    // Hints, accent text/lines and field borders stay readable in both themes (GUI test F3-F5).
+    for (const bool d : {true, false})
+    {
+        CAPTURE(d);
+        theme_apply(d);
+        const unsigned bg = ImGui::GetColorU32(ImGuiCol_WindowBg);
+        const unsigned popup = ImGui::GetColorU32(ImGuiCol_PopupBg);
+        CHECK(contrast(ImGui::GetColorU32(ImGuiCol_TextDisabled), bg) >= 4.5);
+        CHECK(contrast(ImGui::GetColorU32(ImGuiCol_TextDisabled), popup) >= 4.5);
+        CHECK(contrast(ImGui::GetColorU32(ImGuiCol_CheckMark), ImGui::GetColorU32(ImGuiCol_FrameBg)) >= 3.0);
+        for (unsigned i = 0; i < 8; ++i)
+        {
+            CAPTURE(i);
+            CHECK(contrast(theme_signal_color(i), popup) >= 3.0); // the plot bg is deep, as dark as the popup
+        }
+        if (!d)
+        {
+            CHECK(ImGui::GetStyle().FrameBorderSize > 0.0f);
+            CHECK(contrast(ImGui::GetColorU32(ImGuiCol_Border), popup) >= 3.0);
+        }
+    }
     CHECK(contrast(theme_u32(0x000000), theme_u32(0xffffff)) == doctest::Approx(21.0));
 }

@@ -1,20 +1,20 @@
 /*
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "core/python_engine.h"
@@ -196,6 +196,27 @@ std::string format_names()
     return out;
 }
 
+// kraken.send / send_periodic / lin_* without interface_id: the first open interface (the
+// measurement's; ids of interfaces outside the setup come first and are never open), LIN calls the
+// first open LIN one; else 0.
+uint16_t send_iface(std::optional<uint16_t> interface_id, bool lin = false)
+{
+    if (interface_id)
+    {
+        return *interface_id;
+    }
+    py::gil_scoped_release release;
+    for (Iface& i : g_app->ifaces)
+    {
+        std::shared_lock lock(i.io_mutex);
+        if (i.open && (!lin || i.info.bus_type == BusType::LIN))
+        {
+            return i.index;
+        }
+    }
+    return 0;
+}
+
 // LIN control calls follow the iface_send contract: shared io lock, only while open.
 template <class Fn>
 void with_open_iface(uint16_t interface_id, Fn fn)
@@ -277,7 +298,7 @@ class _SignalWriter:
         self._is_err = is_err
     def write(self, text):
         if text:
-            _cangaroo_output(text, self._is_err)
+            _kraken_output(text, self._is_err)
     def flush(self):
         pass
 
@@ -290,8 +311,8 @@ class _SignalReader(io.TextIOBase):
         self._buffer = ""
     def readline(self, size=-1):
         if not self._buffer:
-            self._buffer = _cangaroo_input()
-            if not self._buffer and _cangaroo_stop_check():
+            self._buffer = _kraken_input()
+            if not self._buffer and _kraken_stop_check():
                 raise KeyboardInterrupt("Script stopped by user")
         if size is None or size < 0:
             line, self._buffer = self._buffer, ""
@@ -307,37 +328,54 @@ sys.stdin = _SignalReader()
 
 import threading as _threading
 
-def _cangaroo_trace(frame, event, arg):
-    if _cangaroo_stop_check():
+def _kraken_trace(frame, event, arg):
+    if _kraken_stop_check():
         raise KeyboardInterrupt("Script stopped by user")
-    return _cangaroo_trace
+    return _kraken_trace
 
-sys.settrace(_cangaroo_trace)
-_threading.settrace(_cangaroo_trace)
+sys.settrace(_kraken_trace)
+_threading.settrace(_kraken_trace)
+
+# time.sleep is a C call the trace hook can't interrupt: wait on the engine instead, so Stop and
+# Exit end a sleeping script (and its threads) at once.
+import time as _time
+def _kraken_time_sleep(secs):
+    if secs < 0:
+        raise ValueError("sleep length must be non-negative")
+    if _kraken_sleep(secs):
+        raise KeyboardInterrupt("Script stopped by user")
+_time.sleep = _kraken_time_sleep
 
 # Stop raises KeyboardInterrupt in the script's threads too: end them quietly.
-_cangaroo_excepthook_orig = _threading.excepthook
-def _cangaroo_excepthook(args):
+_kraken_excepthook_orig = _threading.excepthook
+def _kraken_excepthook(args):
     if not issubclass(args.exc_type, KeyboardInterrupt):
-        _cangaroo_excepthook_orig(args)
-_threading.excepthook = _cangaroo_excepthook
+        _kraken_excepthook_orig(args)
+_threading.excepthook = _kraken_excepthook
 )";
 
-void worker_main(PyState& s, App& app, std::string code)
+void worker_main(PyState& s, App& app, std::string code, std::string name)
 {
     const PyGILState_STATE gstate = PyGILState_Ensure();
     try
     {
         py::dict globals = py::globals();
-        globals["_cangaroo_output"] = py::cpp_function(
+        globals["_kraken_output"] = py::cpp_function(
             [&s](const std::string& text, bool is_err) { python_console_append(s, text, is_err); });
-        globals["_cangaroo_stop_check"] = py::cpp_function([&s]() -> bool { return s.stop_requested.load(); });
-        globals["_cangaroo_input"] = py::cpp_function([&s]() -> std::string { return read_input_line(s); },
+        globals["_kraken_stop_check"] = py::cpp_function([&s]() -> bool { return s.stop_requested.load(); });
+        globals["_kraken_input"] = py::cpp_function([&s]() -> std::string { return read_input_line(s); },
                                                       py::call_guard<py::gil_scoped_release>());
+        globals["_kraken_sleep"] = py::cpp_function([&s](double secs) -> bool
+        {
+            std::unique_lock lock(s.mutex);
+            s.rx_cv.wait_for(lock, std::chrono::duration<double>(secs), [&s] { return s.stop_requested.load(); });
+            return s.stop_requested.load();
+        }, py::call_guard<py::gil_scoped_release>());
         py::exec(prelude);
         try
         {
-            py::exec(code);
+            const py::module_ builtins = py::module_::import("builtins");
+            builtins.attr("exec")(builtins.attr("compile")(code, name, "exec"), globals);
         }
         catch (py::error_already_set& e)
         {
@@ -349,12 +387,12 @@ void worker_main(PyState& s, App& app, std::string code)
         }
         // Threads the script started (daemon ones too) stop at their next traced line: wait
         // for them, or a sleeping one would wake into the next run once stop_requested clears.
-        s.stop_requested = true;
+        python_stop(s); // also wakes threads sleeping in time.sleep
         PyEval_SetTrace(nullptr, nullptr); // this thread's own lines must not raise now
         const py::object script_threads = py::eval(
             "lambda: [t for t in _threading.enumerate()"
             " if t is not _threading.main_thread() and not isinstance(t, _threading._DummyThread)]");
-        // ponytail: a thread stuck in a long C call (time.sleep(60)) is left behind after 2 s. PyThreadState_SetAsyncExc if a leaked thread matters.
+        // ponytail: a thread stuck in another long C call (socket recv) is left behind after 2 s. PyThreadState_SetAsyncExc if a leaked thread matters.
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (py::len(script_threads()) > 0 && std::chrono::steady_clock::now() < deadline)
         {
@@ -388,12 +426,24 @@ auto flag_setter(uint16_t flag)
     return [flag](BusMessage& msg, bool on) { msg.flags = on ? msg.flags | flag : msg.flags & ~flag; };
 }
 
+// Payload length for Message.dlc / set_data: a CAN FD length (0-8, 12, 16, ... 64), LIN 0-8.
+// Anything else raises instead of going out as an invalid frame.
+int checked_length(long long len, bool lin)
+{
+    if (len < 0 || (lin ? len > 8 : std::ranges::find(bus_dlc_lengths, len) == bus_dlc_lengths.end()))
+    {
+        throw py::value_error(lin ? std::format("{} bytes: a LIN frame has 0-8", len)
+                                  : std::format("{} bytes is not a CAN FD length (0-8, 12, 16, 20, 24, 32, 48, 64)", len));
+    }
+    return static_cast<int>(len);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
-// The embedded "cangaroo" module. Every function runs on a script thread with the GIL.
+// The embedded "kraken" module. Every function runs on a script thread with the GIL.
 // ---------------------------------------------------------------------------
-PYBIND11_EMBEDDED_MODULE(cangaroo, m)
+PYBIND11_EMBEDDED_MODULE(kraken, m)
 {
     py::class_<BusMessage>(m, "Message")
         .def(py::init<>())
@@ -406,7 +456,7 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
         .def_property("id", [](const BusMessage& msg) { return msg.id; },
                       [](BusMessage& msg, uint32_t id) { msg.id = id; })
         .def_property("dlc", [](const BusMessage& msg) { return msg.len; },
-                      [](BusMessage& msg, int len) { set_length(msg, len); })
+                      [](BusMessage& msg, int len) { set_length(msg, checked_length(len, msg.type == BusType::LIN)); })
         .def_property("extended", flag_getter(bus_flag::extended), flag_setter(bus_flag::extended))
         .def_property("fd", flag_getter(bus_flag::fd), flag_setter(bus_flag::fd))
         .def_property("rtr", flag_getter(bus_flag::rtr), flag_setter(bus_flag::rtr))
@@ -434,8 +484,8 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
         .def("set_data", [](BusMessage& msg, const py::bytes& data)
         {
             const std::string s = data;
-            const auto n = std::min<std::size_t>(s.size(), bus_max_data_bytes);
-            set_length(msg, static_cast<int>(n));
+            const int n = checked_length(static_cast<long long>(s.size()), msg.type == BusType::LIN);
+            set_length(msg, n);
             msg.data.fill(0);
             std::copy_n(s.data(), n, reinterpret_cast<char*>(msg.data.data()));
         })
@@ -444,7 +494,7 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
             [](BusMessage& msg, const std::string& s) { msg.type = s == "LIN" ? BusType::LIN : BusType::CAN; })
         .def("__repr__", [](const BusMessage& msg)
         {
-            std::string r = msg.type == BusType::LIN ? "<cangaroo.LinMessage id=" : "<cangaroo.Message id=";
+            std::string r = msg.type == BusType::LIN ? "<kraken.LinMessage id=" : "<kraken.Message id=";
             append_id(r, msg);
             r += std::format(" dlc={} data=", msg.len);
             append_bytes(r, std::span<const uint8_t>(msg.data.data(), msg.len), false);
@@ -455,38 +505,39 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
     m.def("make_lin_message", [](uint8_t id, uint8_t dlc)
     {
         BusMessage msg{.id = id, .type = BusType::LIN};
-        set_length(msg, dlc);
+        set_length(msg, checked_length(dlc, true));
         return msg;
     }, py::arg("id"), py::arg("dlc") = 0);
 
     // --- send / receive ---
 
-    m.def("lin_sleep", [](uint16_t interface_id)
+    m.def("lin_sleep", [](std::optional<uint16_t> interface_id)
     {
-        with_open_iface(interface_id, [](Iface& i)
+        with_open_iface(send_iface(interface_id, true), [](Iface& i)
         {
             if (i.ops->lin_sleep_wakeup != nullptr) i.ops->lin_sleep_wakeup(i, false);
         });
-    }, py::arg("interface_id") = 0);
+    }, py::arg("interface_id") = py::none());
 
-    m.def("lin_wakeup", [](uint16_t interface_id)
+    m.def("lin_wakeup", [](std::optional<uint16_t> interface_id)
     {
-        with_open_iface(interface_id, [](Iface& i)
+        with_open_iface(send_iface(interface_id, true), [](Iface& i)
         {
             if (i.ops->lin_sleep_wakeup != nullptr) i.ops->lin_sleep_wakeup(i, true);
         });
-    }, py::arg("interface_id") = 0);
+    }, py::arg("interface_id") = py::none());
 
-    m.def("lin_set_schedule_table", [](uint8_t table_index, uint16_t interface_id)
+    m.def("lin_set_schedule_table", [](uint8_t table_index, std::optional<uint16_t> interface_id)
     {
-        with_open_iface(interface_id, [table_index](Iface& i)
+        with_open_iface(send_iface(interface_id, true), [table_index](Iface& i)
         {
             if (i.ops->lin_set_schedule != nullptr) i.ops->lin_set_schedule(i, table_index);
         });
-    }, py::arg("table_index"), py::arg("interface_id") = 0);
+    }, py::arg("table_index"), py::arg("interface_id") = py::none());
 
-    m.def("send", [](BusMessage& msg, uint16_t interface_id)
+    m.def("send", [](BusMessage& msg, std::optional<uint16_t> iface_arg)
     {
+        const uint16_t interface_id = send_iface(iface_arg);
         if (interface_id >= g_app->ifaces.size())
         {
             throw py::value_error(std::format("no interface with id {}", interface_id));
@@ -502,10 +553,11 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
         {
             throw std::runtime_error(std::format("interface {} not open or send failed", interface_id));
         }
-    }, "Send a Message on interface `interface_id` (see interfaces()). Raises ValueError for "
+    }, "Send a Message on interface `interface_id` (see interfaces(); default: the first interface of "
+       "the running measurement). Raises ValueError for "
        "an unknown id and RuntimeError when the interface is not open (no measurement "
        "running) or the driver rejects the frame.",
-       py::arg("msg"), py::arg("interface_id") = 0);
+       py::arg("msg"), py::arg("interface_id") = py::none());
 
     m.def("receive", [](double timeout_sec)
     {
@@ -550,8 +602,9 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
 
     // --- Periodic TX ---
 
-    m.def("send_periodic", [](BusMessage msg, unsigned interval_ms, uint16_t interface_id) -> int
+    m.def("send_periodic", [](BusMessage msg, unsigned interval_ms, std::optional<uint16_t> iface_arg) -> int
     {
+        const uint16_t interface_id = send_iface(iface_arg);
         PyState& s = *g_state;
         msg.iface = interface_id;
         std::scoped_lock lock(s.periodic_mutex);
@@ -573,7 +626,7 @@ PYBIND11_EMBEDDED_MODULE(cangaroo, m)
             }
         }));
         return handle;
-    }, py::arg("msg"), py::arg("interval_ms"), py::arg("interface_id") = 0);
+    }, py::arg("msg"), py::arg("interval_ms"), py::arg("interface_id") = py::none());
 
     m.def("stop_periodic", [](int handle)
     {
@@ -1069,7 +1122,7 @@ void python_rx_consumer(void* user, const BusMessage& msg)
     if (s.rx_dropped.fetch_add(1, std::memory_order_relaxed) == 0)
     {
         log_warning("Python: receive() queue full (" + std::to_string(rx_queue_max)
-                    + " frames), dropping frames; see cangaroo.rx_dropped()");
+                    + " frames), dropping frames; see kraken.rx_dropped()");
     }
 }
 
@@ -1088,7 +1141,7 @@ void python_input(PyState& s, std::string line)
     s.input_cv.notify_one();
 }
 
-bool python_run(App& app, PyState& s, std::string code)
+bool python_run(App& app, PyState& s, std::string code, std::string name)
 {
     g_app = &app;
     g_state = &s;
@@ -1129,7 +1182,8 @@ bool python_run(App& app, PyState& s, std::string code)
     s.rx_dropped = 0;
     s.stop_requested = false;
     s.running = true;
-    s.worker = std::jthread([&s, &app, code = std::move(code)]() mutable { worker_main(s, app, std::move(code)); });
+    s.worker = std::jthread([&s, &app, code = std::move(code), name = std::move(name)]() mutable
+                            { worker_main(s, app, std::move(code), std::move(name)); });
     return true;
 }
 
@@ -1152,7 +1206,7 @@ void python_poll(PyState& s)
 void python_shutdown(App& app, PyState& s)
 {
     python_stop(s);
-    // ponytail: a script inside time.sleep() only notices the stop when the sleep ends. Async exception if stop must be immediate.
+    // ponytail: time.sleep() is interruptible (prelude); a script blocked in another C call (socket recv) delays exit until it returns.
     while (s.running)
     {
         tasks_drain(app.tasks, app); // the script may be waiting on a main-thread call

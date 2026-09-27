@@ -235,20 +235,31 @@ TEST_CASE("statistics: window min/max/mean/median, cached until range or data ch
     frame();
     const GraphSignal& r = g.signals[0];
     REQUIRE(g.x_max == 4.0);
-    CHECK(r.stats == std::array<double, 4>{1, 5, 3, 3}); // {5,1,4,2,3} by hand
+    CHECK(std::array{r.stats[0], r.stats[1], r.stats[2], r.stats[3]} == std::array<double, 4>{1, 5, 3, 3}); // {5,1,4,2,3} by hand
+    CHECK(r.stats[4] == doctest::Approx(1.4142136)); // std dev: sqrt((4 + 4 + 1 + 1 + 0) / 5)
 
     g.x_max = 9.0;
     frame(); // range changed, but the last recompute was < 250 ms ago: still the old window
-    CHECK(r.stats == std::array<double, 4>{1, 5, 3, 3});
+    CHECK(std::array{r.stats[0], r.stats[1], r.stats[2], r.stats[3]} == std::array<double, 4>{1, 5, 3, 3});
     g.signals[0].stats_wall = -1e9; // as if 250 ms passed
     frame();
-    CHECK(r.stats == std::array<double, 4>{1, 50, 16.5, 7.5}); // mean 165/10, median (5+10)/2
+    CHECK(std::array{r.stats[0], r.stats[1], r.stats[2], r.stats[3]} == std::array<double, 4>{1, 50, 16.5, 7.5}); // mean 165/10, median (5+10)/2
+
+    // Cursors on: the statistics cover A..B (either order), not the visible window.
+    g.cursor_on = true;
+    g.cursor_a = 9.0;
+    g.cursor_b = 5.0;
+    g.signals[0].stats_wall = -1e9;
+    frame();
+    CHECK(std::array{r.stats[0], r.stats[1], r.stats[2], r.stats[3]} == std::array<double, 4>{10, 50, 30, 30}); // {10,20,30,40,50}
+    g.cursor_on = false;
 
     g.x_min = 20.0;
     g.x_max = 30.0;
     g.signals[0].stats_wall = -1e9;
     frame();
     CHECK(std::isnan(r.stats[0])); // empty window
+    CHECK(std::isnan(r.stats[4]));
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
 }
@@ -444,11 +455,11 @@ TEST_CASE("workspace XML: graph config round trip, missing signals dropped")
     CHECK(none.empty());
 }
 
-TEST_CASE("value text: float32/float64 signals at their precision, integers %.6g")
+TEST_CASE("value text: float32 at float precision, integer signals at the decimals of their factor")
 {
     CanDbSignal f32{.value_type = SignalValueType::float32};
     CanDbSignal f64{.value_type = SignalValueType::float64};
-    CanDbSignal i32{};
+    CanDbSignal i32{.factor = 0.5};
     GraphSignal s;
     s.can_sig = &f32;
     CHECK(graph_format_value(s, static_cast<double>(0.1f)) == "0.1");
@@ -459,8 +470,20 @@ TEST_CASE("value text: float32/float64 signals at their precision, integers %.6g
     CHECK(graph_format_value(s, 123456.789012) == "123456.789012");
     CHECK(graph_format_value(s, std::nan("")) == "-");
     s.can_sig = &i32;
-    CHECK(graph_format_value(s, 123456.789012) == "123457");
     CHECK(graph_format_value(s, 1234.5) == "1234.5");
+    // T87b F1: %.6g cut a 1e-07 latitude to 89.909 and 0.01 m depth to 11000
+    CanDbSignal lat{.length = 32, .factor = 1e-07};
+    s.can_sig = &lat;
+    CHECK(graph_format_value(s, can_signal_raw_to_physical(lat, 899089582)) == "89.9089582");
+    CanDbSignal depth{.length = 32, .is_unsigned = true, .factor = 0.01};
+    s.can_sig = &depth;
+    CHECK(graph_format_value(s, can_signal_raw_to_physical(depth, 1099999)) == "10999.99");
+    // computed values (cursor B - A, mean) without float noise: "2.83", not "2.83000000000000"
+    CHECK(graph_format_value(s, can_signal_raw_to_physical(depth, 1099999) - can_signal_raw_to_physical(depth, 1099716)) == "2.83");
+    CHECK(graph_format_value(s, -0.001) == "0.00");
+    CanDbSignal deg{.length = 16, .factor = 0.0057};
+    s.can_sig = &deg;
+    CHECK(graph_format_value(s, 5.1 - 0.0000000001) == "5.1000");
     s.kind = GraphSignalKind::BusLoad;
     s.can_sig = nullptr;
     CHECK(graph_format_value(s, 42.0) == "42");
@@ -546,6 +569,68 @@ TEST_CASE("signal list: j/k select a row, Space toggles its visibility")
     ImGui::EndFrame();
     type('k');
     CHECK(g.selected == 1);
+    ImPlot::DestroyContext();
+    ImGui::DestroyContext();
+}
+
+TEST_CASE("remove keeps the XY X signal; a new signal gets an unused colour; Text view follows the window")
+{
+    ImGui::CreateContext();
+    ImPlot::CreateContext();
+    GraphState g;
+    for (int k = 0; k < 4; ++k)
+    {
+        GraphSignal s = sig("V");
+        s.name = std::string(1, static_cast<char>('a' + k));
+        s.color = graph_next_color(g);
+        g.signals.push_back(std::move(s));
+    }
+    g.x_signal = 2; // "c"
+    graph_remove_signal(g, 0);
+    REQUIRE(g.signals.size() == 3);
+    CHECK(g.signals[static_cast<std::size_t>(g.x_signal)].name == "c");
+    graph_remove_signal(g, 2); // after X: X stays
+    CHECK(g.signals[static_cast<std::size_t>(g.x_signal)].name == "c");
+
+    // "a" (colour 0) and "d" (colour 3) are gone: the next two take exactly those colours.
+    const uint32_t c0 = ImGui::ColorConvertFloat4ToU32(ImPlot::GetColormapColor(0));
+    CHECK(graph_next_color(g) == c0);
+    for (const GraphSignal& s : g.signals)
+    {
+        CHECK(s.color != c0);
+    }
+    ImPlot::DestroyContext();
+    ImGui::DestroyContext();
+
+    // Finding 2: the time window also advances in Text view (statistics use it).
+    ImGui::CreateContext();
+    ImPlot::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = {1400, 900};
+    io.DeltaTime = 1.0f / 60.0f;
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+    theme_load_fonts(15.0f);
+    App app;
+    const auto frame = [&]
+    {
+        ImGui::NewFrame();
+        WorkspaceTab* tab = draw_workspace(app);
+        draw_graph_windows(app, tab);
+        ImGui::EndFrame();
+        app.menu.pending.reset();
+    };
+    frame();
+    GraphState& main = app.workspace.tabs[0].graphs[0];
+    main.view = GraphView::Text;
+    main.follow = true;
+    main.duration = 0; // All: [0, max(now, 1)]
+    main.x_min = 5.0;
+    main.x_max = 60.0;
+    frame();
+    CHECK(main.x_min == 0.0);
+    CHECK(main.x_max == 1.0);
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
 }

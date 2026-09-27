@@ -1,5 +1,5 @@
 // lin_usb device->host frame -> BusMessage. Flag semantics from lin_usb_protocol.h
-// (the firmware's wire contract), not from cangaroo output.
+// (the firmware's wire contract), not from Kraken Explorer output.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>

@@ -2,16 +2,16 @@
 include(FetchContent)
 set(FETCHCONTENT_QUIET ON)
 
-function(cangaroo_fetch name url)
+function(kraken_fetch name url)
     FetchContent_Declare(${name} URL ${url} DOWNLOAD_EXTRACT_TIMESTAMP ON ${ARGN})
 endfunction()
 
-cangaroo_fetch(imgui     https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b-docking.tar.gz)
-cangaroo_fetch(implot    https://github.com/epezent/implot/archive/refs/tags/v1.0.tar.gz)
-cangaroo_fetch(glfw      https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz)
-cangaroo_fetch(pugixml   https://github.com/zeux/pugixml/archive/refs/tags/v1.15.tar.gz)
-cangaroo_fetch(doctest   https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz)
-cangaroo_fetch(nanosvg   https://github.com/memononen/nanosvg/archive/239e102ec2c691f2902e20ace2ed36ee4a35cfe6.tar.gz)
+kraken_fetch(imgui     https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b-docking.tar.gz)
+kraken_fetch(implot    https://github.com/epezent/implot/archive/refs/tags/v1.0.tar.gz)
+kraken_fetch(glfw      https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz)
+kraken_fetch(pugixml   https://github.com/zeux/pugixml/archive/refs/tags/v1.15.tar.gz)
+kraken_fetch(doctest   https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz)
+kraken_fetch(nanosvg   https://github.com/memononen/nanosvg/archive/239e102ec2c691f2902e20ace2ed36ee4a35cfe6.tar.gz)
 
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -40,6 +40,8 @@ target_include_directories(imgui SYSTEM PUBLIC
     ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${imgui_SOURCE_DIR}/misc/cpp)
 # No IMGUI_DISABLE_OBSOLETE_FUNCTIONS: implot v1.0 still calls the deprecated AddPolyline overload.
 target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+# 32-bit ImWchar: codepoints above U+FFFF (the squid glyph in ui/theme, emoji typed into text fields).
+target_compile_definitions(imgui PUBLIC IMGUI_USE_WCHAR32)
 
 add_library(implot STATIC
     ${implot_SOURCE_DIR}/implot.cpp

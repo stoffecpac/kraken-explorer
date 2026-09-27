@@ -31,11 +31,21 @@ TEST_CASE("filter patterns")
 TEST_CASE("save path appends the filter extension")
 {
     const fs::path dir = "/tmp/x";
-    CHECK(file_dialog_save_path(dir, "work", "*.cangaroo") == "/tmp/x/work.cangaroo");
-    CHECK(file_dialog_save_path(dir, "work.xml", "*.cangaroo") == "/tmp/x/work.xml");
+    CHECK(file_dialog_save_path(dir, "work", "*.kraken") == "/tmp/x/work.kraken");
+    CHECK(file_dialog_save_path(dir, "work.xml", "*.kraken") == "/tmp/x/work.xml");
     CHECK(file_dialog_save_path(dir, "log", "*") == "/tmp/x/log");
     CHECK(file_dialog_save_path(dir, "log", "*.log *.txt") == "/tmp/x/log.log");
     CHECK(file_dialog_save_path(dir, "/abs/name", "*.csv") == "/abs/name.csv");
+}
+
+TEST_CASE("picking another save type swaps the name's extension (T87b a1 F2: Save Trace wrote ASC)")
+{
+    CHECK(file_dialog_retype("trace.asc", "*.pcapng") == "trace.pcapng");
+    CHECK(file_dialog_retype("trace.asc", "*.candump *.log") == "trace.candump");
+    CHECK(file_dialog_retype("trace", "*.mf4") == "trace.mf4");
+    CHECK(file_dialog_retype("sub/trace.asc", "*.trc") == "sub/trace.trc");
+    CHECK(file_dialog_retype("trace.asc", "*") == "trace.asc");
+    CHECK(file_dialog_retype("", "*.asc").empty());
 }
 
 TEST_CASE("listing and sorting a directory")

@@ -2,31 +2,31 @@
 
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
 // Regression tests for BusMessage signal packing (see issue #34).
 //
 // Every expected value below was produced by cantools (an independent DBC
-// implementation), not by cangaroo itself. That matters: the big-endian bug in
+// implementation), not by Kraken Explorer itself. That matters: the big-endian bug in
 // issue #34 survived for so long precisely because extract and inject were
 // wrong in mutually cancelling ways, so any round-trip test written against
-// cangaroo alone passed. Regenerate these vectors with cantools if you ever
-// need to extend the table -- never from cangaroo output.
+// Kraken Explorer alone passed. Regenerate these vectors with cantools if you ever
+// need to extend the table -- never from Kraken Explorer output.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>

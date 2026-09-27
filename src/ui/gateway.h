@@ -14,6 +14,10 @@
 
 struct App;
 struct Iface;
+namespace pugi
+{
+class xml_node;
+}
 
 struct GatewayRule
 {
@@ -58,8 +62,18 @@ enum class GatewayRuleProblem
 // thread only (rules are only written by the UI, so no lock).
 [[nodiscard]] GatewayRuleProblem gateway_rule_problem(const Gateway& gw, uint16_t src, uint16_t dst) noexcept;
 
+// Rule row edit: rule i forwards src -> dst from now on. False (rule unchanged) for src == dst or
+// a missing interface, which would echo every frame back onto its own bus.
+bool gateway_rule_reroute(Gateway& gw, std::size_t i, uint16_t src, uint16_t dst);
+
 // RxConsumer::fn with user = Gateway*: sends every matching frame on the rule's destination.
 void gateway_rx_consumer(void* user, const BusMessage& m);
+
+// Workspace <gateway enabled>: one <rule id extended name src-driver src dst-driver dst> per rule,
+// interfaces by driver + name. Load replaces rules and enabled; rules whose interfaces are missing
+// are dropped with a warning. No element when there is nothing to keep.
+void gateway_save_xml(const Gateway& gw, const std::deque<Iface>& ifaces, pugi::xml_node root);
+void gateway_load_xml(Gateway& gw, const std::deque<Iface>& ifaces, pugi::xml_node root);
 
 // The "CAN Gateway" window while gw.open.
 void draw_gateway(App& app, Gateway& gw);

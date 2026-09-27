@@ -401,7 +401,7 @@ namespace
 
 [[nodiscard]] bool load(const std::string& text, LinDb& db)
 {
-    const auto path = std::filesystem::temp_directory_path() / "cangaroo_ldf_parser_test.ldf";
+    const auto path = std::filesystem::temp_directory_path() / "kraken_ldf_parser_test.ldf";
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out << text;
@@ -566,7 +566,7 @@ TEST_CASE("lin_db_load keeps the database on failure")
     LinDb db;
     REQUIRE(load(sample_ldf, db));
 
-    CHECK_FALSE(lin_db_load(db, "/nonexistent/cangaroo.ldf"));
+    CHECK_FALSE(lin_db_load(db, "/nonexistent/kraken.ldf"));
     CHECK_FALSE(db.last_error.empty());
     CHECK(db.frames.size() == 2);
     CHECK(db.master_node == "MasterNode");

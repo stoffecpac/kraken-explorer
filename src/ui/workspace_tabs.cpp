@@ -18,7 +18,7 @@ void build_default_layout(WorkspaceTab& tab, ImVec2 size)
     ImGui::DockBuilderRemoveNode(tab.dockspace);
     ImGui::DockBuilderAddNode(tab.dockspace, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(tab.dockspace, size);
-    // app-screenshot.png: Graph is the main area (right ~60 %), everything else in the left column.
+    // Default layout: Graph is the main area (right ~60 %), everything else in the left column.
     // Graph inherits the central node, so it takes up size changes and the column keeps its width.
     // With the column central, a layout saved on a wider screen squeezes it to WindowMinSize (T58).
     ImGuiID graph = 0;
@@ -155,9 +155,17 @@ WorkspaceTab* draw_workspace(App& app)
     {
         unsigned close_uid = 0;
         bool open_rename = false;
+        bool add_tab = false;
         if (ImGui::BeginTabBar("##workspaces", ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_FittingPolicyScroll))
         {
-            const bool closable = ws.tabs.size() > 1; // the last tab stays
+            // The last tab stays. After "+" the first tab's close X lands where "+" was: no X until
+            // the mouse has left the bar, so a double click on "+" can't close a tab.
+            if (ws.hold_close && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+            {
+                ws.hold_close = false;
+            }
+            const bool closable = ws.tabs.size() > 1 && !ws.hold_close;
+            std::vector<ImGuiID> ids(ws.tabs.size()); // ImGui's tab ids, to follow a drag reorder
             for (int i = 0; i < static_cast<int>(ws.tabs.size()); ++i)
             {
                 WorkspaceTab& tab = ws.tabs[static_cast<std::size_t>(i)];
@@ -165,7 +173,9 @@ WorkspaceTab* draw_workspace(App& app)
                 const ImGuiTabItemFlags tab_flags =
                     ws.select_current && i == ws.current ? ImGuiTabItemFlags_SetSelected : 0;
                 bool open = true;
-                if (ImGui::BeginTabItem(label.c_str(), closable ? &open : nullptr, tab_flags))
+                const bool selected = ImGui::BeginTabItem(label.c_str(), closable ? &open : nullptr, tab_flags);
+                ids[static_cast<std::size_t>(i)] = ImGui::GetItemID();
+                if (selected)
                 {
                     if (!ws.select_current)
                     {
@@ -194,9 +204,40 @@ WorkspaceTab* draw_workspace(App& app)
                     close_uid = tab.uid;
                 }
             }
+            add_tab = ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing | ImGuiTabItemFlags_NoTooltip);
+            ImGui::SetItemTooltip("New tab  %s", command_shortcut(app.menu, Command::NewTraceView));
+            // A drag reorders only ImGui's tabs: apply it now and put ws.tabs in the same order, so
+            // numbers, digit keys and the saved workspace follow what is shown.
+            if (ImGuiTabBar* bar = ImGui::GetCurrentTabBar(); bar->ReorderRequestTabId != 0)
+            {
+                const bool moved = ImGui::TabBarProcessReorder(bar);
+                bar->ReorderRequestTabId = 0;
+                if (moved)
+                {
+                    const unsigned current_uid = ws.tabs[static_cast<std::size_t>(ws.current)].uid;
+                    std::vector<WorkspaceTab> order;
+                    for (const ImGuiTabItem& t : bar->Tabs)
+                    {
+                        if (const auto k = std::ranges::find(ids, t.ID); k != ids.end())
+                        {
+                            order.push_back(std::move(ws.tabs[static_cast<std::size_t>(k - ids.begin())]));
+                        }
+                    }
+                    if (order.size() == ws.tabs.size()) // every tab submitted this frame
+                    {
+                        ws.tabs = std::move(order);
+                        ws.current = static_cast<int>(std::ranges::find(ws.tabs, current_uid, &WorkspaceTab::uid) - ws.tabs.begin());
+                    }
+                }
+            }
             ImGui::EndTabBar();
         }
         ws.select_current = false;
+        if (add_tab)
+        {
+            ws.hold_close = true;
+            workspace_add_tab(ws, workspace_unique_title(ws)); // selected on the next frame
+        }
         if (open_rename)
         {
             ImGui::OpenPopup("Rename tab##workspace");

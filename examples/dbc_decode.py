@@ -2,17 +2,17 @@
 Decode received CAN messages using loaded DBC files.
 
 Demonstrates:
-  - cangaroo.databases()  — list all loaded DBC files and their messages
-  - cangaroo.decode(msg)  — decode a message into physical signal values
-  - cangaroo.lookup(msg)  — inspect the DBC definition (bit layout, scaling, etc.)
+  - kraken.databases()  — list all loaded DBC files and their messages
+  - kraken.decode(msg)  — decode a message into physical signal values
+  - kraken.lookup(msg)  — inspect the DBC definition (bit layout, scaling, etc.)
 
 Usage: Load one or more DBC files in the Measurement Setup, start the
 measurement, then run this script.
 """
-import cangaroo
+import kraken
 
 # ---- show loaded databases ----
-dbs = cangaroo.databases()
+dbs = kraken.databases()
 if not dbs:
     print("No DBC files loaded. Add a DBC in Measurement Setup.")
 else:
@@ -27,10 +27,10 @@ else:
 print("Waiting for messages...\n")
 
 while True:
-    messages = cangaroo.receive(timeout=1.0)
+    messages = kraken.receive(timeout=1.0)
 
     for msg in messages:
-        decoded = cangaroo.decode(msg)
+        decoded = kraken.decode(msg)
 
         if decoded is None:
             # No DBC definition for this ID — print raw

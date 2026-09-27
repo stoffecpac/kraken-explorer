@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <format>
+#include <numeric>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,12 @@ constexpr std::array<const char*, static_cast<std::size_t>(InstrumentKind::Count
 constexpr std::array<const char*, 3> led_names = {"nonzero", "above", "below"};
 
 constexpr ImU32 red_zone = IM_COL32(0xe0, 0x40, 0x40, 255);
+// Instrument plate: deep-sea petrol, lighter at the top; sea-foam text.
+constexpr ImU32 plate_top = IM_COL32(0x0e, 0x2e, 0x36, 255);
+constexpr ImU32 plate_bottom = IM_COL32(0x06, 0x16, 0x1b, 255);
+constexpr ImU32 plate_well = IM_COL32(0x03, 0x0c, 0x10, 255); // bar / LED background
+constexpr ImU32 plate_text = IM_COL32(0xe6, 0xf4, 0xf1, 255);
+constexpr ImU32 plate_text_dim = IM_COL32(0x8f, 0xb5, 0xb0, 255);
 
 float fraction(const Instrument& inst, double v)
 {
@@ -48,7 +55,8 @@ std::string value_text(const Instrument& inst)
         return "-";
     }
     const std::string_view unit = inst.sig != nullptr ? std::string_view(inst.sig->unit) : std::string_view{};
-    return unit.empty() ? std::format("{:.6g}", inst.value) : std::format("{:.6g} {}", inst.value, unit);
+    const std::string v = inst.sig != nullptr ? can_signal_format(*inst.sig, inst.value) : std::format("{:.6g}", inst.value);
+    return unit.empty() ? v : std::format("{} {}", v, unit);
 }
 
 bool led_lit(const Instrument& inst)
@@ -90,7 +98,7 @@ void draw_gauge(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
     const float r = g.r;
     const ImVec2 c{p0.x + g.cx, p0.y + g.cy};
     const ImU32 accent = ImGui::GetColorU32(ImGuiCol_CheckMark);
-    const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text, 0.7f);
+    const ImU32 text = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     dial_face(dl, c, r);
     if (inst.red_from < inst.max)
     {
@@ -107,11 +115,11 @@ void draw_gauge(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
     {
         const float a = dial_start + dial_span * fraction(inst, inst.value);
         const bool red = inst.red_from < inst.max && inst.value >= inst.red_from;
-        dl->AddLine(c, {c.x + std::cos(a) * r * 0.82f, c.y + std::sin(a) * r * 0.82f}, red ? red_zone : accent,
-                    std::max(2.0f, r * 0.05f));
+        dl->PathArcTo(c, r * 0.64f, dial_start, a, 32); // water line up to the needle
+        dl->PathStroke(ImGui::GetColorU32(ImGuiCol_CheckMark, 0.45f), 0, std::max(2.0f, r * 0.04f));
+        dial_needle(dl, c, r * 0.82f, a, red ? red_zone : accent);
     }
     dl->AddCircleFilled(c, r * 0.08f, dial_brass);
-    dial_bezel(dl, c, r, std::max(2.0f, r * 0.07f));
     dl->AddText(ImGui::GetFont(), fs * g.value_scale, {p0.x + g.value.x0, p0.y + g.value.y0}, IM_COL32_WHITE, v.c_str());
 }
 
@@ -166,8 +174,17 @@ void draw_knob(App& app, Instrument& inst, ImVec2 size)
     dl->PathStroke(accent, 0, r * 0.1f);
     dl->AddLine({c.x + std::cos(a) * r * 0.3f, c.y + std::sin(a) * r * 0.3f}, {c.x + std::cos(a) * r * 0.7f, c.y + std::sin(a) * r * 0.7f},
                 IM_COL32_WHITE, std::max(2.0f, r * 0.06f));
-    dial_bezel(dl, c, r, std::max(2.0f, r * 0.07f));
     ImGui::TextDisabled("%s", value_text(inst).c_str());
+}
+
+// Text as large as `fit` allows (never below the UI font, at most 8x), centred in `box`.
+void draw_fitted(ImDrawList* dl, ImVec2 p0, ImVec2 fit, ImVec2 box, ImU32 col, const std::string& text)
+{
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+    const float scale = std::clamp(std::min(fit.x / std::max(ts.x, 1.0f), fit.y / std::max(ts.y, 1.0f)), 1.0f, 8.0f);
+    dl->AddText(ImGui::GetFont(), fs * scale, {p0.x + (box.x - ts.x * scale) * 0.5f, p0.y + (box.y - ts.y * scale) * 0.5f},
+                col, text.c_str());
 }
 
 void draw_bar(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
@@ -175,7 +192,7 @@ void draw_bar(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
     const float f = inst.has_value ? fraction(inst, inst.value) : 0.0f;
     const ImU32 accent = ImGui::GetColorU32(ImGuiCol_CheckMark);
     const ImVec2 p1{p0.x + size.x, p0.y + size.y};
-    dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), 3.0f);
+    dl->AddRectFilled(p0, p1, plate_well, 3.0f);
     if (inst.vertical)
     {
         dl->AddRectFilled({p0.x, p1.y - size.y * f}, p1, accent, 3.0f);
@@ -184,10 +201,7 @@ void draw_bar(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
     {
         dl->AddRectFilled(p0, {p0.x + size.x * f, p1.y}, accent, 3.0f);
     }
-    dl->AddRect(p0, p1, dial_brass, 3.0f, 0, 1.5f);
-    const std::string v = value_text(inst);
-    const ImVec2 ts = ImGui::CalcTextSize(v.c_str());
-    dl->AddText({p0.x + (size.x - ts.x) * 0.5f, p0.y + (size.y - ts.y) * 0.5f}, ImGui::GetColorU32(ImGuiCol_Text), v.c_str());
+    draw_fitted(dl, p0, {size.x * 0.9f, size.y * 0.8f}, size, ImGui::GetColorU32(ImGuiCol_Text), value_text(inst));
 }
 
 void draw_led(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
@@ -200,8 +214,7 @@ void draw_led(ImDrawList* dl, ImVec2 p0, ImVec2 size, const Instrument& inst)
     {
         dl->AddCircleFilled(c, r * 1.3f, ImGui::GetColorU32(ImGuiCol_CheckMark, 0.25f), 32); // glow
     }
-    dl->AddCircleFilled(c, r, on ? accent : IM_COL32(0x10, 0x20, 0x24, 255), 32);
-    dl->AddCircle(c, r, dial_brass, 32, 2.0f);
+    dl->AddCircleFilled(c, r, on ? accent : plate_well, 32);
 }
 
 // Filterable combo of every CAN signal in the setup's DBCs. Returns true when a signal was picked.
@@ -214,7 +227,12 @@ bool draw_signal_picker(App& app, InstrumentPanel& p, Instrument& inst)
         return false;
     }
     p.picker.can_only = true;
-    const SignalEntry* hit = signal_search_input(p.picker, app.setup, "Filter...", p.search, ImGui::IsWindowAppearing());
+    const bool appearing = ImGui::IsWindowAppearing();
+    if (appearing)
+    {
+        p.search.clear(); // one filter for every widget's combo: a stale one would re-bind on Enter
+    }
+    const SignalEntry* hit = signal_search_input(p.picker, app.setup, "Filter...", p.search, appearing);
     for (int row = 0; row < static_cast<int>(p.picker.hits.size()); ++row)
     {
         const SignalEntry& e = p.picker.entries[static_cast<std::size_t>(p.picker.hits[static_cast<std::size_t>(row)].entry)];
@@ -276,6 +294,7 @@ bool draw_properties(App& app, InstrumentPanel& p, Instrument& inst)
         inst.col = std::clamp(grid[0], 0, 63);
         inst.row = std::clamp(grid[1], 0, 255);
         instrument_resize(inst, grid[2], grid[3]);
+        instrument_panel_settle(p, static_cast<std::size_t>(&inst - p.items.data()));
     }
     switch (inst.kind)
     {
@@ -385,6 +404,7 @@ void draw_input(App& app, const InstrumentPanel& p, Instrument& inst, ImVec2 siz
         ImGui::SetNextItemWidth(size.x);
         if (ImGui::SliderScalar("##v", ImGuiDataType_Double, &inst.input, &inst.min, &inst.max, "%g"))
         {
+            inst.input = instrument_snap(inst, inst.input); // show what is sent
             instrument_send(app, inst, inst.input);
         }
         ImGui::TextDisabled("%s", value_text(inst).c_str());
@@ -422,22 +442,21 @@ void draw_display(Instrument& inst, ImVec2 size)
         draw_gauge(dl, p0, size, inst);
         break;
     case InstrumentKind::Bar:
-        draw_bar(dl, p0, inst.vertical ? size : ImVec2{size.x, std::min(size.y, fs * 1.6f)}, inst);
+        draw_bar(dl, p0, inst.vertical ? size : ImVec2{size.x, std::min(size.y, fs * 4.0f)}, inst);
         break;
     case InstrumentKind::Led:
         draw_led(dl, p0, size, inst);
         break;
     case InstrumentKind::Numeric:
     {
-        const std::string v = value_text(inst);
-        dl->AddText(ImGui::GetFont(), fs * 2.0f, p0, ImGui::GetColorU32(ImGuiCol_CheckMark), v.c_str());
+        draw_fitted(dl, p0, {size.x * 0.95f, size.y * 0.9f}, size, ImGui::GetColorU32(ImGuiCol_CheckMark), value_text(inst));
         break;
     }
     case InstrumentKind::Text:
     {
         const std::string_view name = inst.has_value && inst.sig ? can_signal_value_name(*inst.sig, inst.raw) : std::string_view{};
         const std::string v = name.empty() ? value_text(inst) : std::string(name);
-        dl->AddText(ImGui::GetFont(), fs * 1.6f, p0, ImGui::GetColorU32(ImGuiCol_Text), v.c_str());
+        draw_fitted(dl, p0, {size.x * 0.95f, size.y * 0.9f}, size, ImGui::GetColorU32(ImGuiCol_Text), v);
         break;
     }
     case InstrumentKind::Trend:
@@ -608,6 +627,32 @@ void instrument_panel_move(InstrumentPanel& p, std::size_t i, int col, int row)
     }
     a.col = col;
     a.row = row;
+    instrument_panel_settle(p, i);
+}
+
+void instrument_panel_settle(InstrumentPanel& p, std::size_t keep)
+{
+    const auto overlap = [](const Instrument& a, const Instrument& b)
+    {
+        return a.col < b.col + b.col_span && b.col < a.col + a.col_span && a.row < b.row + b.row_span && b.row < a.row + a.row_span;
+    };
+    std::vector<std::size_t> order(p.items.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    if (keep < order.size())
+    {
+        std::rotate(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(keep), order.begin() + static_cast<std::ptrdiff_t>(keep) + 1);
+    }
+    for (std::size_t k = 0; k < order.size(); ++k)
+    {
+        Instrument& a = p.items[order[k]];
+        a.col_span = std::min(a.col_span, p.columns);
+        a.col = std::clamp(a.col, 0, p.columns - a.col_span);
+        while (std::any_of(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(k),
+                           [&](std::size_t j) { return overlap(a, p.items[j]); }))
+        {
+            ++a.row;
+        }
+    }
 }
 
 void instrument_resize(Instrument& inst, int col_span, int row_span)
@@ -635,10 +680,19 @@ GaugeLayout instrument_gauge_layout(float w, float h, float fs, float value_w, f
         g.lo = {g.cx - x - lo_w, y, g.cx - x, y + fs};
         g.hi = {g.cx + x, y, g.cx + x + hi_w, y + fs};
     }
-    // Inside the dial below the centre: top 0.2r, height <= 0.45r, half width <= 0.6r stays in the circle.
-    g.value_scale = std::min({1.0f, g.r * 0.45f / fs, g.r * 1.2f / std::max(value_w, 1.0f)});
+    // In the wedge under the scale's ends, where the needle never points: top 0.45r, height <= 0.3r,
+    // half width <= 0.45r. Grows with the dial.
+    g.value_scale = std::min(g.r * 0.3f / fs, g.r * 0.9f / std::max(value_w, 1.0f));
+    float vy = g.cy + g.r * 0.45f;
+    if (g.value_scale < 0.8f) // too small to read inside: under a smaller dial at the UI size
+    {
+        g.value_scale = std::min(1.0f, (w - 2.0f * pad) / std::max(value_w, 1.0f));
+        g.scale_labels = false;
+        g.r = std::max(std::min(w * 0.5f - pad, (h - 3.0f * pad - fs * g.value_scale) * 0.5f), 2.0f);
+        g.cy = pad + g.r;
+        vy = g.cy + g.r + pad;
+    }
     const float vw = value_w * g.value_scale;
-    const float vy = g.cy + g.r * 0.2f;
     g.value = {g.cx - vw * 0.5f, vy, g.cx + vw * 0.5f, vy + fs * g.value_scale};
     return g;
 }
@@ -688,6 +742,7 @@ void draw_instrument_panel(App& app, const WorkspaceTab& tab, InstrumentPanel& p
     if (ImGui::InputInt("Columns", &p.columns))
     {
         p.columns = std::clamp(p.columns, 1, 64);
+        instrument_panel_settle(p);
     }
     ImGui::EndDisabled();
     if (ImGui::BeginPopup("add"))
@@ -731,9 +786,28 @@ void draw_instrument_panel(App& app, const WorkspaceTab& tab, InstrumentPanel& p
         extent = {std::max(extent.x, pos.x + size.x - origin.x), std::max(extent.y, pos.y + size.y - origin.y)};
         ImGui::SetCursorScreenPos(pos);
         ImGui::PushID(static_cast<int>(i));
-        ImGui::PushStyleColor(ImGuiCol_Border, p.edit ? dial_brass : ImGui::GetColorU32(ImGuiCol_Border));
-        if (ImGui::BeginChild("cell", size, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+        // A bulkhead plate, the same in both themes, so its text is light in both. Rimless; the
+        // accent rim only marks the cells in Edit mode.
+        // The theme's colours, for the properties popup and the tooltip (plain theme windows).
+        const std::array<ImVec4, 4> theme = {ImGui::GetStyleColorVec4(ImGuiCol_Border), ImGui::GetStyleColorVec4(ImGuiCol_ChildBg),
+                                             ImGui::GetStyleColorVec4(ImGuiCol_Text), ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled)};
+        const auto push_theme = [&]
         {
+            constexpr std::array cols{ImGuiCol_Border, ImGuiCol_ChildBg, ImGuiCol_Text, ImGuiCol_TextDisabled};
+            for (std::size_t k = 0; k < cols.size(); ++k)
+            {
+                ImGui::PushStyleColor(cols[k], theme[k]);
+            }
+        };
+        ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetColorU32(ImGuiCol_CheckMark));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, plate_bottom);
+        ImGui::PushStyleColor(ImGuiCol_Text, plate_text);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, plate_text_dim);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, std::max(1.5f, fs / 10.0f));
+        if (ImGui::BeginChild("cell", size, p.edit ? ImGuiChildFlags_Borders : ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+        {
+            ImGui::GetWindowDrawList()->AddRectFilledMultiColor({pos.x + 2.0f, pos.y + 2.0f}, {pos.x + size.x - 2.0f, pos.y + size.y - 2.0f},
+                                                                plate_top, plate_top, plate_bottom, plate_bottom);
             if (p.edit)
             {
                 // Submitted before the content so they own the hover; the grip first, it sits on top.
@@ -775,6 +849,7 @@ void draw_instrument_panel(App& app, const WorkspaceTab& tab, InstrumentPanel& p
                 ImGui::SetCursorPos({ImGui::GetStyle().WindowPadding.x, ImGui::GetStyle().WindowPadding.y + fs * 1.2f});
                 ImGui::TextDisabled("%s (right-click to bind)", instrument_kind_name(inst.kind));
             }
+            push_theme(); // the plate's light text would vanish on a light-theme popup
             if (ImGui::BeginPopupContextWindow("props"))
             {
                 if (draw_properties(app, p, inst))
@@ -787,9 +862,11 @@ void draw_instrument_panel(App& app, const WorkspaceTab& tab, InstrumentPanel& p
             {
                 ImGui::SetTooltip("%s.%s = %s", inst.msg ? inst.msg->name.c_str() : "?", inst.signal.c_str(), value_text(inst).c_str());
             }
+            ImGui::PopStyleColor(4);
         }
         ImGui::EndChild();
-        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
         ImGui::PopID();
     }
     if (drag.item >= 0)
@@ -813,6 +890,7 @@ void draw_instrument_panel(App& app, const WorkspaceTab& tab, InstrumentPanel& p
         if (drag.drop && drag.resize)
         {
             instrument_resize(p.items[di], drag.a, drag.b);
+            instrument_panel_settle(p, di);
         }
         else if (drag.drop)
         {

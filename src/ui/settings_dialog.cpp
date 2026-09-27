@@ -17,6 +17,14 @@ namespace
 
 constexpr const char* popup = "Settings";
 
+// Cancel, Esc and the title bar's X: drop the live theme / text size preview.
+void revert_preview(App& app, const SettingsDialogState& s)
+{
+    app.settings.theme = s.saved_theme;
+    app.settings.font_scale_pct = s.saved_font_scale_pct;
+    settings_apply_theme(app);
+}
+
 } // namespace
 
 void draw_settings_dialog(App& app, SettingsDialogState& s)
@@ -30,8 +38,15 @@ void draw_settings_dialog(App& app, SettingsDialogState& s)
         ImGui::OpenPopup(popup);
     }
     const float em = ImGui::GetFontSize();
-    if (!ImGui::BeginPopupModal(popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    // BeginPopupModal also clears `open` while the popup is closed: revert only on the X itself.
+    const bool was_open = ImGui::IsPopupOpen(popup);
+    bool open = true;
+    if (!ImGui::BeginPopupModal(popup, &open, ImGuiWindowFlags_AlwaysAutoResize))
     {
+        if (was_open && !open)
+        {
+            revert_preview(app, s);
+        }
         return;
     }
     ImGui::SeparatorText("Appearance");
@@ -107,6 +122,7 @@ void draw_settings_dialog(App& app, SettingsDialogState& s)
         ImGui::MarkIniSettingsDirty();
     }
     app.menu.capturing_shortcut = s.capture >= 0;
+    const bool capturing = app.menu.capturing_shortcut; // Esc then cancels the capture, not the dialog
     if (s.capture >= 0)
     {
         const ImGuiIO& io = ImGui::GetIO();
@@ -140,11 +156,9 @@ void draw_settings_dialog(App& app, SettingsDialogState& s)
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(em * 6.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    if (ImGui::Button("Cancel", ImVec2(em * 6.0f, 0.0f)) || (!capturing && ImGui::Shortcut(ImGuiKey_Escape)))
     {
-        app.settings.theme = s.saved_theme;
-        app.settings.font_scale_pct = s.saved_font_scale_pct;
-        settings_apply_theme(app);
+        revert_preview(app, s);
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();

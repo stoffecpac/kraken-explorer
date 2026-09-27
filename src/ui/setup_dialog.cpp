@@ -325,8 +325,14 @@ void draw_tree(App& app, SetupDialogState& s)
 // Multi-select list of the enumerated interfaces not yet in any network.
 void draw_add_interfaces_popup(App& app, SetupDialogState& s, SetupNetwork& net)
 {
-    if (!ImGui::BeginPopupModal("Add Interfaces", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    bool open = true;
+    if (!ImGui::BeginPopupModal("Add Interfaces", &open, ImGuiWindowFlags_AlwaysAutoResize))
     {
+        if (!open) // the title bar's X = Cancel
+        {
+            s.add_candidates.clear();
+            s.add_checked.clear();
+        }
         return;
     }
     if (s.add_candidates.empty() && s.add_checked.empty())
@@ -368,7 +374,7 @@ void draw_add_interfaces_popup(App& app, SetupDialogState& s, SetupNetwork& net)
     }
     const bool ok = ImGui::Button("OK", ImVec2(ImGui::GetFontSize() * 6, 0));
     ImGui::SameLine();
-    if (ok || ImGui::Button("Cancel", ImVec2(ImGui::GetFontSize() * 6, 0)))
+    if (ok || ImGui::Button("Cancel", ImVec2(ImGui::GetFontSize() * 6, 0)) || ImGui::Shortcut(ImGuiKey_Escape))
     {
         for (std::size_t k = 0; ok && k < s.add_candidates.size(); ++k)
         {
@@ -497,13 +503,8 @@ void draw_databases_page(SetupDialogState& s, SetupNetwork& net)
     }
 }
 
-void draw_page(App& app, SetupDialogState& s)
+void draw_page_widgets(App& app, SetupDialogState& s, SetupNetwork& net)
 {
-    if (s.net < 0 || s.net >= static_cast<int>(s.work.networks.size()))
-    {
-        return;
-    }
-    SetupNetwork& net = s.work.networks[static_cast<std::size_t>(s.net)];
     switch (s.sel)
     {
     case SetupSel::Network:
@@ -545,6 +546,22 @@ void draw_page(App& app, SetupDialogState& s)
     }
 }
 
+void draw_page(App& app, SetupDialogState& s)
+{
+    if (s.net < 0 || s.net >= static_cast<int>(s.work.networks.size()))
+    {
+        return;
+    }
+    SetupNetwork& net = s.work.networks[static_cast<std::size_t>(s.net)];
+    // Ids per network and item: a field still active when the tree selects another network
+    // would otherwise write its buffer into that one (same "##name" id).
+    ImGui::PushID(s.net);
+    ImGui::PushID(s.item);
+    draw_page_widgets(app, s, net);
+    ImGui::PopID();
+    ImGui::PopID();
+}
+
 } // namespace
 
 void setup_dialog_open(App& app, SetupDialogState& s)
@@ -578,7 +595,8 @@ void draw_setup_dialog(App& app, SetupDialogState& s)
     }
     const float em = ImGui::GetFontSize();
     ImGui::SetNextWindowSize(ImVec2(em * 60, em * 36), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Measurement Setup"))
+    bool open = true; // the title bar's X = Cancel; s.work is copied afresh on the next open
+    if (!ImGui::BeginPopupModal("Measurement Setup", &open))
     {
         return;
     }
@@ -988,7 +1006,8 @@ void draw_lin_frame_defaults(const LinDb& db, SetupInterface& intf, LinFrameDefa
         fd.open_request = false;
     }
     ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 36, 0), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("LIN Frame Default Data"))
+    bool open = true; // edits apply live, so X and Esc are OK
+    if (!ImGui::BeginPopupModal("LIN Frame Default Data", &open))
     {
         return;
     }
@@ -1074,7 +1093,7 @@ void draw_lin_frame_defaults(const LinDb& db, SetupInterface& intf, LinFrameDefa
         }
         ImGui::SameLine();
     }
-    if (ImGui::Button("OK", ImVec2(ImGui::GetFontSize() * 6, 0)))
+    if (ImGui::Button("OK", ImVec2(ImGui::GetFontSize() * 6, 0)) || ImGui::Shortcut(ImGuiKey_Escape))
     {
         ImGui::CloseCurrentPopup();
     }

@@ -1,6 +1,6 @@
 // AUTOSAR E2E Profile 2 CRC (CRC-8H2F).
 //
-// A wrong CRC here is invisible in cangaroo itself -- it only shows up as a real
+// A wrong CRC here is invisible in Kraken Explorer itself -- it only shows up as a real
 // ECU silently rejecting every frame the TX generator sends. The anchors are
 // therefore external: the check value from the AUTOSAR CRC specification, and a
 // bitwise reimplementation that shares no code with the lookup table under test.

@@ -92,6 +92,9 @@ struct InstrumentPanel
 [[nodiscard]] double instrument_knob_drag(const Instrument& inst, double from, float dy_px, float px_per_range);
 // Edit-mode layout: moves item `i` to cell (col, row); an item covering that cell takes i's old place.
 void instrument_panel_move(InstrumentPanel& p, std::size_t i, int col, int row);
+// No widget overlaps another or sticks out past `columns`: item `keep` stays (clamped into the
+// columns), the others in order move down to the first free row. Run after every move / resize.
+void instrument_panel_settle(InstrumentPanel& p, std::size_t keep = SIZE_MAX);
 void instrument_resize(Instrument& inst, int col_span, int row_span);
 
 // Gauge layout inside a w x h area (below the title line), relative to its top-left. Text widths
@@ -109,7 +112,7 @@ struct GaugeLayout
     float cx = 0.0f;
     float cy = 0.0f;
     float r = 0.0f;
-    float value_scale = 1.0f;
+    float value_scale = 1.0f; // >= 0.8 (or the cell width): inside the dial, or under it on a small one
     InstrumentRect value;
     bool scale_labels = false;
     InstrumentRect lo;

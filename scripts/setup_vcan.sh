@@ -11,7 +11,7 @@ set -e
 modprobe vcan
 modprobe can-gw
 
-# cangaroo asks for a 32 MB socket receive buffer; without CAP_NET_ADMIN the kernel
+# Kraken Explorer asks for a 32 MB socket receive buffer; without CAP_NET_ADMIN the kernel
 # caps it at rmem_max (stock 212 KB drops frames under a `cangen -g 0` flood)
 sysctl -w net.core.rmem_max=4194304
 

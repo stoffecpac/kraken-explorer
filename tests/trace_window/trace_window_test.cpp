@@ -8,9 +8,12 @@
 
 #include <imgui.h>
 #include <imgui_internal.h> // FindWindowByName, HoveredIdPreviousFrame
+#include <pugixml.hpp>
 
 #include "app.h"
+#include "db/dbc/dbc_parser.h"
 #include "db/model/can_db.h"
+#include "drivers/driver.h"
 #include "ui_test.h"
 #include "ui/trace_window.h"
 #include "ui/workspace_tabs.h"
@@ -51,6 +54,16 @@ TEST_CASE("data and id columns render in hex or decimal")
     out.clear();
     trace_append_id(out, m, true);
     CHECK(out == "291");
+
+    // A remote frame: DLC 3 requested, no payload (candump 124#R3). Nothing in the Data column.
+    BusMessage rtr = frame(0x124, {}, bus_flag::rtr);
+    set_length(rtr, 3);
+    for (const bool dec : {false, true})
+    {
+        out.clear();
+        trace_append_data(out, rtr, dec);
+        CHECK(out.empty());
+    }
 
     const BusMessage ext = frame(0x18FEF100, {}, bus_flag::extended);
     out.clear();
@@ -526,4 +539,185 @@ TEST_CASE("y copies the selected row's cells to the clipboard, tab-separated")
         CHECK(line.find('\t') != std::string::npos);
         CHECK_FALSE(s.yank_pending);
     }
+}
+
+TEST_CASE("Filter text matches the ID as shown: decimal in Dec mode")
+{
+    App app;
+    TraceWindowState s;
+    const BusMessage msgs[] = {frame(0x555, {1}, 0, 10), frame(0x100, {2}, 0, 20)};
+    trace_append(app.trace, msgs);
+    s.filter.text = "1365"; // 0x555
+    s.decimal = true;
+    trace_window_update(s, app);
+    REQUIRE(s.rolling.size() == 1);
+    CHECK(s.rolling[0].index == 0);
+    s.decimal = false;
+    s.filter_dirty = true;
+    while (s.refilter != UINT64_MAX || s.filter_dirty)
+    {
+        trace_window_update(s, app);
+    }
+    CHECK(s.rolling.empty());
+    s.filter.text = "555";
+    s.filter_dirty = true;
+    while (s.refilter != UINT64_MAX || s.filter_dirty)
+    {
+        trace_window_update(s, app);
+    }
+    CHECK(s.rolling.size() == 1);
+}
+
+TEST_CASE("cycle statistics leave out the stopped time between two measurements")
+{
+    App app;
+    TraceWindowState s;
+    constexpr int64_t ms = 1'000'000;
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::system_clock::now().time_since_epoch()).count();
+    app.measuring = true;
+    const BusMessage first[] = {frame(0x123, {1}, 0, now - 300 * ms), frame(0x123, {1}, 0, now - 200 * ms)};
+    trace_append(app.trace, first);
+    trace_window_update(s, app);
+    app.measuring = false; // stopped ...
+    trace_window_update(s, app);
+    app.measuring = true; // ... and started again 10 s later
+    const BusMessage second[] = {frame(0x123, {1}, 0, now + 10'000 * ms), frame(0x123, {1}, 0, now + 10'100 * ms)};
+    trace_append(app.trace, second);
+    trace_window_update(s, app);
+    REQUIRE(s.agg.size() == 1);
+    const CycleStats& c = s.agg[0].cycle;
+    CHECK(c.count == 2); // 100 ms before the stop, 100 ms after the start
+    CHECK(c.max_ns == 100 * ms);
+}
+
+namespace
+{
+
+// Clipboard text after 'y' on the row `downs` j presses down (vim selection), in the current view.
+std::string yank_after(App& app, TraceWindowState& s, const WorkspaceTab& tab, int downs)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    for (int i = 0; i < downs; ++i)
+    {
+        io.AddInputCharactersUTF8("j");
+        draw_frame(app, s, tab);
+    }
+    ImGui::SetClipboardText("");
+    io.AddInputCharactersUTF8("y");
+    draw_frame(app, s, tab);
+    for (int i = 0; i < 3 && s.yank_pending; ++i)
+    {
+        draw_frame(app, s, tab);
+    }
+    return ImGui::GetClipboardText();
+}
+
+} // namespace
+
+TEST_CASE("y copies the selected row's own Index, not the next row's")
+{
+    const UiTest ui;
+    for (const TraceViewMode mode : {TraceViewMode::Aggregated, TraceViewMode::Rolling})
+    {
+        CAPTURE(static_cast<int>(mode));
+        App app;
+        TraceWindowState s;
+        s.modes[0] = mode;
+        const WorkspaceTab tab{.title = "Trace", .uid = 1};
+        const BusMessage msgs[] = {frame(0x100, {1}, 0, 1), frame(0x200, {0xAB}, 0, 2), frame(0x300, {3}, 0, 3)};
+        trace_append(app.trace, msgs);
+        draw_frame(app, s, tab, 1000.0f, true);
+        draw_frame(app, s, tab);
+        const std::string line = yank_after(app, s, tab, 2); // row 2 of 3: 0x200
+        CHECK(line.starts_with("2\t"));
+        CHECK(line.find("0x200") != std::string::npos);
+        CHECK(line.find("AB") != std::string::npos);
+        CHECK_FALSE(line.ends_with("\t3"));
+        CHECK(line.find('\n') == std::string::npos);
+    }
+}
+
+TEST_CASE("y on a Monitor row with DBC signals keeps its Index; expanded signal rows are lines of their own")
+{
+    const UiTest ui;
+    {
+        App app;
+        auto db = std::make_shared<CanDb>();
+        REQUIRE(dbc_parse("VERSION \"\"\n\nBU_: ECU\n\nBO_ 256 Engine: 2 ECU\n"
+                          " SG_ Speed : 0|8@1+ (1,0) [0|255] \"rpm\" ECU\n"
+                          " SG_ Temp : 8|8@1+ (1,-40) [-40|215] \"degC\" ECU\n",
+                          *db));
+        app.setup.networks.push_back({.name = "Net", .can_dbs = {db}});
+        setup_rebuild_cache(app.setup);
+        TraceWindowState s;
+        const WorkspaceTab tab{.title = "Trace", .uid = 1};
+        const BusMessage msgs[] = {frame(0x100, {7, 60}, 0, 1), frame(0x200, {1}, 0, 2)};
+        trace_append(app.trace, msgs);
+        draw_frame(app, s, tab, 1000.0f, true);
+        draw_frame(app, s, tab);
+        std::string line = yank_after(app, s, tab, 1);
+        CHECK(line.starts_with("1\t"));
+        CHECK(line.find("Engine") != std::string::npos);
+        CHECK_FALSE(line.ends_with("\t2"));
+
+        // Expand row 0 (tree node id: table id -> PushID(agg index) -> &row, in the table's scroll window).
+        const ImGuiTable* t = agg_table();
+        REQUIRE(t != nullptr);
+        const int i0 = 0;
+        const ImGuiID row_seed = ImHashData(&i0, sizeof(int), t->ID);
+        const void* ptr = &s.agg[0];
+        t->InnerWindow->StateStorage.SetInt(ImHashData(&ptr, sizeof(void*), row_seed), 1);
+        draw_frame(app, s, tab);
+        ImGui::SetClipboardText("");
+        ImGui::GetIO().AddInputCharactersUTF8("y");
+        draw_frame(app, s, tab);
+        for (int i = 0; i < 3 && s.yank_pending; ++i)
+        {
+            draw_frame(app, s, tab);
+        }
+        line = ImGui::GetClipboardText();
+        CHECK(line.starts_with("1\t"));
+        CHECK(line.find("\nSpeed\t7 rpm") != std::string::npos);
+        CHECK(line.find("\nTemp\t20 degC") != std::string::npos);
+        CHECK(line.find("0x200") == std::string::npos);
+    }
+}
+
+TEST_CASE("trace window settings round-trip through the workspace XML")
+{
+    std::deque<Iface> ifaces;
+    static const DriverOps fake = {.name = "Fake"};
+    for (const char* name : {"fake0", "fake1"})
+    {
+        Iface& i = ifaces.emplace_back();
+        i.ops = &fake;
+        i.info.name = name;
+    }
+    TraceWindowState a;
+    a.modes[0] = TraceViewMode::Rolling;
+    a.modes[2] = TraceViewMode::Rolling;
+    a.ts_mode = TimestampMode::AbsoluteUtc;
+    a.decimal = true;
+    a.filter.text = "Engine";
+    a.filter.show_tx = false;
+    a.filter.hidden_ifaces = {1};
+    pugi::xml_document doc;
+    trace_window_save_xml(a, ifaces, doc.append_child("tracewindow"));
+    const pugi::xml_node el = doc.child("tracewindow");
+    CHECK(std::string(el.attribute("monitor-view").as_string()) == "log");
+    CHECK(std::string(el.child("hidden-interface").attribute("interface").as_string()) == "fake1");
+
+    TraceWindowState b;
+    trace_window_load_xml(b, ifaces, el);
+    CHECK(b.modes[0] == TraceViewMode::Rolling);
+    CHECK(b.modes[1] == TraceViewMode::Rolling); // the UDS default, saved as "log"
+    CHECK(b.modes[2] == TraceViewMode::Rolling);
+    CHECK(b.ts_mode == TimestampMode::AbsoluteUtc);
+    CHECK(b.decimal);
+    CHECK(b.filter.text == "Engine");
+    CHECK(b.filter_edit == "Engine");
+    CHECK_FALSE(b.filter.show_tx);
+    CHECK(b.filter.show_rx);
+    CHECK(b.filter.hidden_ifaces == std::set<uint16_t>{1});
 }

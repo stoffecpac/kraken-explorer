@@ -215,7 +215,8 @@ void draw_message_form(DbcEditorState& s, CanDbMessage& m)
         s.id_conflict = false;
     }
     bool extended = (m.raw_id & extended_bit) != 0;
-    if (ImGui::InputText("Id (hex)", &s.id_text, ImGuiInputTextFlags_CharsHexadecimal))
+    ImGui::InputText("Id (hex)", &s.id_text, ImGuiInputTextFlags_CharsHexadecimal);
+    if (ImGui::IsItemDeactivatedAfterEdit()) // Enter or leaving the field; not on every prefix typed
     {
         uint32_t id = 0;
         const bool valid = parse_number(s.id_text, id, 16) && id <= (extended ? 0x1FFFFFFFu : 0x7FFu);
@@ -262,10 +263,10 @@ void draw_signal_form(DbcEditorState& s, CanDbMessage& m, int index)
     ImGui::SeparatorText(std::format("Signal of {}", m.name).c_str());
     ImGui::PushItemWidth(fs * 16.0f);
     changed |= ImGui::InputText("Name", &sig.name);
-    int start = sig.start_bit;
+    int start = static_cast<int>(dbc_start_bit(sig)); // DBC numbering, not the parser's Motorola index
     if (ImGui::InputInt("Start bit", &start))
     {
-        sig.start_bit = static_cast<uint16_t>(std::clamp(start, 0, 511));
+        dbc_set_start_bit(sig, static_cast<unsigned>(std::clamp(start, 0, 511)));
         changed = true;
     }
     int length = sig.length;
@@ -277,7 +278,9 @@ void draw_signal_form(DbcEditorState& s, CanDbMessage& m, int index)
     int order = sig.big_endian ? 1 : 0;
     if (ImGui::Combo("Byte order", &order, "Intel (little endian)\0Motorola (big endian)\0"))
     {
+        const unsigned dbc_bit = dbc_start_bit(sig);
         sig.big_endian = order == 1;
+        dbc_set_start_bit(sig, dbc_bit); // the shown start bit stays
         changed = true;
     }
     bool is_signed = !sig.is_unsigned;

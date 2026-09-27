@@ -1,20 +1,20 @@
 /*
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "trace_recorder.h"
@@ -157,15 +157,21 @@ bool finish_file(Recorder& r)
     return ok;
 }
 
-std::vector<BusMessage> take_pending(Recorder& r)
+// The queued frames ordered by time. RX threads of several interfaces append interleaved and a
+// little late relative to each other, so unless `all` (end of recording) the newest
+// Recorder::reorder_window stays queued and is merged with what arrives until the next drain.
+std::vector<BusMessage> take_pending(Recorder& r, bool all)
 {
-    std::vector<BusMessage> batch;
-    {
-        const std::scoped_lock lock(r.pending_mutex);
-        batch = std::exchange(r.pending, {});
-    }
-    // RX threads of several interfaces append interleaved; order the batch by time.
+    const std::scoped_lock lock(r.pending_mutex);
+    std::vector<BusMessage> batch = std::exchange(r.pending, {});
     std::ranges::stable_sort(batch, {}, &BusMessage::ts_ns);
+    if (!all && !batch.empty())
+    {
+        const int64_t cut = batch.back().ts_ns - std::chrono::nanoseconds(Recorder::reorder_window).count();
+        const auto keep = std::ranges::upper_bound(batch, cut, {}, &BusMessage::ts_ns);
+        r.pending.assign(keep, batch.end());
+        batch.erase(keep, batch.end());
+    }
     return batch;
 }
 
@@ -325,7 +331,7 @@ void stop_recording(Recorder& r)
         return;
     }
 
-    if (!write_messages(r, take_pending(r)) || !finish_file(r))
+    if (!write_messages(r, take_pending(r, true)) || !finish_file(r))
     {
         report_failure(r);
         return;
@@ -423,7 +429,7 @@ void recorder_enqueue(Recorder& r, const BusMessage& m)
 
 void recorder_drain(Recorder& r)
 {
-    if (r.recording && !write_messages(r, take_pending(r)))
+    if (r.recording && !write_messages(r, take_pending(r, false)))
     {
         report_failure(r);
     }

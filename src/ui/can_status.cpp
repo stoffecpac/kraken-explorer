@@ -113,7 +113,7 @@ ImVec4 state_color(IfaceState state)
     return ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 }
 
-// Picks up link changes made outside cangaroo (`ip link` in a terminal) and after our commands.
+// Picks up link changes made outside Kraken Explorer (`ip link` in a terminal) and after our commands.
 void refresh_links(App& app, CanStatusState& s)
 {
     const auto now = std::chrono::steady_clock::now();
@@ -182,6 +182,11 @@ void poll(App& app, CanStatusState& s)
     for (auto& iface : app.ifaces)
     {
         CanStatusRow& row = s.rows[iface.index];
+        if (iface.failed) // the listener gave up (link down, device gone): the counters are frozen
+        {
+            row.stats.state = IfaceState::Stopped;
+            continue;
+        }
         if (!iface_stats(iface, row.stats))
         {
             continue; // closed: keep the last values
@@ -396,7 +401,7 @@ void draw_link_buttons(App& app, const Iface& iface)
         ImGui::SameLine();
         if (ImGui::SmallButton("Delete"))
         {
-            link_command(app, LinkOp::Delete, iface.info.name);
+            ImGui::OpenPopup("confirm_delete"); // right next to Down, and vcan may be shared
         }
     }
     else
@@ -408,6 +413,21 @@ void draw_link_buttons(App& app, const Iface& iface)
         }
     }
     ImGui::EndDisabled();
+    if (ImGui::BeginPopup("confirm_delete"))
+    {
+        ImGui::Text("Delete %s?", iface.info.name.c_str());
+        if (ImGui::Button("Delete"))
+        {
+            link_command(app, LinkOp::Delete, iface.info.name);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     ImGui::SameLine();
     ImGui::TextColored(ImGui::GetStyleColorVec4(iface.info.up ? ImGuiCol_CheckMark : ImGuiCol_TextDisabled), "%s",
                        iface.info.up ? "UP" : "DOWN");

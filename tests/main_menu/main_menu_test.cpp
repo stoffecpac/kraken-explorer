@@ -15,13 +15,13 @@ TEST_CASE("open recent keeps 8 unique paths, newest first")
     MainMenu menu;
     for (int i = 0; i < 10; ++i)
     {
-        menu_add_recent(menu, "/w/" + std::to_string(i) + ".cangaroo");
+        menu_add_recent(menu, "/w/" + std::to_string(i) + ".kraken");
     }
-    menu_add_recent(menu, "/w/5.cangaroo");
+    menu_add_recent(menu, "/w/5.kraken");
     REQUIRE(menu.recent_files.size() == max_recent_files);
-    CHECK(menu.recent_files[0] == "/w/5.cangaroo");
-    CHECK(menu.recent_files[1] == "/w/9.cangaroo");
-    CHECK(menu.recent_files.back() == "/w/2.cangaroo"); // 0 and 1 fell off
+    CHECK(menu.recent_files[0] == "/w/5.kraken");
+    CHECK(menu.recent_files[1] == "/w/9.kraken");
+    CHECK(menu.recent_files.back() == "/w/2.kraken"); // 0 and 1 fell off
 }
 
 static void frame(App& app)
@@ -141,8 +141,8 @@ TEST_CASE("control bar buttons trigger their commands, also when it wraps")
         REQUIRE(click_control_bar(app, "Open", "##icon_text"));
         CHECK(menu_take(app.menu, Command::WorkspaceOpen));
         CHECK(app.menu.pending.none()); // nothing else fired while the mouse moved
-        REQUIRE(click_control_bar(app, "Tab", "##icon_text"));
-        CHECK(menu_take(app.menu, Command::NewTraceView));
+        REQUIRE(click_control_bar(app, "Save", "##icon_text"));
+        CHECK(menu_take(app.menu, Command::WorkspaceSave));
 
         const BusMessage m{.id = 0x123};
         trace_append(app.trace, {&m, 1});

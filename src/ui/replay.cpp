@@ -560,7 +560,8 @@ void draw_filter_table(App& app, Replay& r)
 
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
-        const bool expanded = ImGui::TreeNodeEx("##ch", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAllColumns);
+        const bool expanded = ImGui::TreeNodeEx("##ch", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAllColumns
+                                                                | ImGuiTreeNodeFlags_AllowOverlap); // checkbox + Output combo get their clicks
         ImGui::SameLine();
         bool on = all_on;
         if (ImGui::Checkbox(std::format("{} ({})", r.data.file.channels[ch], lin ? "LIN" : "CAN").c_str(), &on))
@@ -910,6 +911,10 @@ void draw_replay(App& app, const WorkspaceTab& tab, Replay& r)
     {
         replay_load_cancel(r); // window closed while diving
         r.data.info.clear();
+    }
+    if (!r.open && r.running)
+    {
+        replay_stop(r); // closed with its X: nothing may keep sending unseen (T87b a3 F4)
     }
     const WorkspaceTab* current = workspace_current(app.workspace);
     if (!r.open || current == nullptr || current->uid != tab.uid)

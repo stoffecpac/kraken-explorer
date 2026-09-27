@@ -2,20 +2,20 @@
 
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -98,14 +98,6 @@ void append_quoted(std::string& out, std::string_view s)
 [[nodiscard]] std::string_view sender_of(const CanDbMessage& msg) noexcept
 {
     return msg.sender.empty() ? no_node : std::string_view(msg.sender);
-}
-
-// Inverse of the parser's Motorola conversion: sequential MSB-first index -> DBC start bit
-// (the MSB's position in sawtooth numbering). The mapping is its own inverse.
-[[nodiscard]] unsigned dbc_start_bit(const CanDbSignal& sig) noexcept
-{
-    if (!sig.big_endian) { return sig.start_bit; }
-    return (sig.start_bit / 8u) * 8u + 7u - (sig.start_bit % 8u);
 }
 
 void append_signal(std::string& out, const CanDbSignal& sig)
@@ -223,4 +215,16 @@ bool dbc_write_file(const CanDb& db, const std::filesystem::path& path, std::str
         return false;
     }
     return true;
+}
+
+unsigned dbc_start_bit(const CanDbSignal& sig) noexcept
+{
+    if (!sig.big_endian) { return sig.start_bit; }
+    return (sig.start_bit / 8u) * 8u + 7u - (sig.start_bit % 8u);
+}
+
+void dbc_set_start_bit(CanDbSignal& sig, unsigned dbc_bit) noexcept
+{
+    sig.start_bit = static_cast<uint16_t>(dbc_bit);
+    sig.start_bit = static_cast<uint16_t>(dbc_start_bit(sig)); // the mapping is its own inverse
 }

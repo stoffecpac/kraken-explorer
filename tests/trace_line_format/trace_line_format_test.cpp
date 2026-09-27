@@ -2,20 +2,20 @@
 
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -23,10 +23,10 @@
 // CAN FD parser used by the replay window.
 //
 // The CAN FD writer used to emit "<flags> 0 0 <len> <len>" instead of the Vector
-// "<BRS> <ESI> <DLC> <len>". It survived because cangaroo's own replay parser
+// "<BRS> <ESI> <DLC> <len>". It survived because our own replay parser
 // read exactly that wrong layout back. So the reference lines here are verbatim
 // python-can 4.6.1 output (can.ASCWriter / can.CanutilsLogWriter), and the DLC
-// table is ISO 11898-1:2015 Table 5 -- never cangaroo output.
+// table is ISO 11898-1:2015 Table 5 -- never Kraken Explorer output.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -163,10 +163,23 @@ TEST_CASE("ASC CAN FD line matches python-can")
             std::string line;
             append_asc_line(line, m, 0, r.channel);
             // time CANFD channel dir id BRS ESI DLC length data...; python-can appends
-            // optional duration/CRC/bit-timing fields after the data, which cangaroo omits.
+            // optional duration/CRC/bit-timing fields after the data, which Kraken Explorer omits.
             CHECK(normalized(line) == normalized(r.reference, 9 + r.data.size()));
         }
     }
+}
+
+TEST_CASE("ASC remote frame line matches python-can: DLC, no data (T87b a1 F7)")
+{
+    // python-can 4.6 can.ASCWriter for Message(timestamp=0, arbitration_id=0x124, is_remote_frame=True,
+    // dlc=3, channel=0), verbatim; Kraken Explorer adds the "Length = ..." suffix after it.
+    const std::string reference = " 0.000000 1  124             Rx   r 3 ";
+    BusMessage m{ .id = 0x124, .flags = bus_flag::rtr };
+    set_length(m, 3);
+    std::ranges::fill(m.data, 0xAA); // must not leak into the line
+    std::string line;
+    append_asc_line(line, m, 0, 1);
+    CHECK(normalized(line.substr(0, line.find("Length"))) == normalized(reference));
 }
 
 TEST_CASE("candump CAN FD line matches python-can")
@@ -264,8 +277,8 @@ TEST_CASE("parse ASC CAN FD line")
         // Vector allows a symbolic frame name between id and BRS.
         { "symbolic name", " 0.020000 CANFD   1 Rx        7E0  EngineData  1 0 3  3 01 02 03", 0x7E0, false, true, true, 1,
           { 1, 2, 3 } },
-        // Written by cangaroo before the writer was fixed; existing traces must keep loading.
-        { "legacy cangaroo layout",
+        // Written by older versions before the writer was fixed; existing traces must keep loading.
+        { "legacy layout",
           "   0.030000 CANFD   2 Rx             456 1 0 0 12 12 00 01 02 03 04 05 06 07 08 09 0A 0B ", 0x456, false, true,
           true, 2, sequence(12) },
     };

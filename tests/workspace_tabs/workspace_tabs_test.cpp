@@ -1,6 +1,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <vector>
+
 #include <imgui.h>
 #include <imgui_internal.h>
 
@@ -137,4 +140,106 @@ TEST_CASE("new tabs get unique names; closing drops the tab's window state; the 
         }
         CHECK(window(app.workspace.tabs[0], "Trace")->Active);
     }
+}
+
+// The workspace tab bar: the one with the trailing "+" (dock nodes have tab bars too).
+static ImGuiTabBar* workspace_bar()
+{
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    for (int n = 0; n < g.TabBars.GetMapSize(); ++n)
+    {
+        if (ImGuiTabBar* b = g.TabBars.TryGetMapData(n);
+            b != nullptr && std::ranges::any_of(b->Tabs, [](const ImGuiTabItem& t) { return (t.Flags & ImGuiTabItemFlags_Trailing) != 0; }))
+        {
+            return b;
+        }
+    }
+    return nullptr;
+}
+
+static ImVec2 tab_center(const ImGuiTabBar& bar, const ImGuiTabItem& t)
+{
+    return {bar.BarRect.Min.x + t.Offset + t.Width * 0.5f, (bar.BarRect.Min.y + bar.BarRect.Max.y) * 0.5f};
+}
+
+static void mouse_button(App& app, bool down)
+{
+    ImGui::GetIO().AddMouseButtonEvent(0, down);
+    frame(app);
+}
+
+TEST_CASE("a double click on + adds one tab and closes none (the first tab's X appears under it)")
+{
+    const UiTest ui({1280, 800}, true, true);
+    App app;
+    for (int i = 0; i < 3; ++i)
+    {
+        frame(app);
+    }
+    ImGuiTabBar* bar = workspace_bar();
+    REQUIRE(bar != nullptr);
+    const auto plus = std::ranges::find_if(bar->Tabs, [](const ImGuiTabItem& t) { return (t.Flags & ImGuiTabItemFlags_Trailing) != 0; });
+    const ImVec2 at = tab_center(*bar, *plus);
+    ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+    frame(app);
+    for (int click = 0; click < 2; ++click)
+    {
+        mouse_button(app, true);
+        mouse_button(app, false);
+        for (int i = 0; i < 5; ++i) // the layout settles; still within the double-click time
+        {
+            frame(app);
+        }
+    }
+    REQUIRE(app.workspace.tabs.size() == 2);
+    CHECK(app.workspace.tabs[0].title == "Trace");
+    CHECK(app.workspace.hold_close);
+    ImGui::GetIO().AddMousePosEvent(at.x, 400.0f); // off the bar: close buttons come back
+    frame(app);
+    CHECK_FALSE(app.workspace.hold_close);
+}
+
+TEST_CASE("dragging a tab reorders the workspace tabs: numbers and digit keys follow")
+{
+    const UiTest ui({1280, 800}, true, true);
+    App app;
+    frame(app);
+    app.menu.pending.set(static_cast<std::size_t>(Command::NewTraceView));
+    for (int i = 0; i < 3; ++i)
+    {
+        frame(app);
+    }
+    REQUIRE(app.workspace.tabs.size() == 2);
+    ImGuiTabBar* bar = workspace_bar();
+    REQUIRE(bar != nullptr);
+    std::vector<ImVec2> centers;
+    for (const ImGuiTabItem& t : bar->Tabs)
+    {
+        if ((t.Flags & ImGuiTabItemFlags_Trailing) == 0)
+        {
+            centers.push_back(tab_center(*bar, t));
+        }
+    }
+    REQUIRE(centers.size() == 2);
+    std::ranges::sort(centers, {}, &ImVec2::x);
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(centers[1].x, centers[1].y); // "2 Tab 2"
+    frame(app);
+    mouse_button(app, true);
+    for (float x = centers[1].x; x > centers[0].x - 30.0f; x -= 10.0f)
+    {
+        io.AddMousePosEvent(x, centers[1].y);
+        frame(app);
+    }
+    mouse_button(app, false);
+    frame(app);
+    REQUIRE(app.workspace.tabs.size() == 2);
+    CHECK(app.workspace.tabs[0].title == "Tab 2");
+    CHECK(app.workspace.tabs[1].title == "Trace");
+    CHECK(app.workspace.tabs[static_cast<std::size_t>(app.workspace.current)].title == "Tab 2");
+
+    io.AddInputCharacter('2'); // the second tab shown is "Trace" now
+    frame(app);
+    frame(app);
+    CHECK(app.workspace.tabs[static_cast<std::size_t>(app.workspace.current)].title == "Trace");
 }

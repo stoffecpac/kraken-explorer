@@ -10,11 +10,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-option(CANGAROO_SANITIZE "Build everything with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
-option(CANGAROO_TESTS "Build the doctest unit tests" ON)
+option(KRAKEN_SANITIZE "Build everything with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+option(KRAKEN_TESTS "Build the doctest unit tests" ON)
 
 # Applied before the dependencies are fetched so third-party code is instrumented too.
-if(CANGAROO_SANITIZE)
+if(KRAKEN_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
     add_link_options(-fsanitize=address,undefined)
 endif()
@@ -26,7 +26,7 @@ include(cmake/deps.cmake)
 # Each module lives in its own src/<module>/CMakeLists.txt (see src/CMakeLists.txt).
 add_subdirectory(src)
 
-if(CANGAROO_TESTS)
+if(KRAKEN_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()

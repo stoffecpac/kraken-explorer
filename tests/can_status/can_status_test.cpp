@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <format>
 #include <span>
 #include <string>
 #include <vector>
@@ -228,4 +229,66 @@ TEST_CASE("error frames are counted per interface from the trace, only the rows 
     add(BusMessage{.id = 4, .errors = bus_error::generic, .iface = 0});
     frame(app, tab);
     CHECK(app.can_status.rows[0].error_frames == 2);
+}
+
+TEST_CASE("an interface whose listener failed shows stopped, not its last state (T87b a2 F9)")
+{
+    Context ctx;
+    App app;
+    fill(app);
+    app.ifaces[1].open = true;
+    app.ifaces[1].failed = true;
+    app.measuring = true;
+    app.can_status.was_measuring = true; // mid-measurement: no re-base of the rows
+    const WorkspaceTab tab{.uid = 3};
+    frame(app, tab);
+    CHECK(app.can_status.rows[1].stats.state == IfaceState::Stopped);
+    CHECK(app.can_status.rows[1].stats.rx_frames == 300); // last counters kept
+    CHECK(app.can_status.rows[0].stats.state == IfaceState::Passive); // closed, not failed: unchanged
+    app.measuring = false;
+    app.ifaces[1].open = false;
+}
+
+TEST_CASE("Delete on a vcan link asks first; Cancel deletes nothing (T87c)")
+{
+    Context ctx;
+    App app;
+    static const DriverOps socketcan{.name = "SocketCAN"};
+    Iface& vcan = app.ifaces.emplace_back();
+    vcan.ops = &socketcan;
+    vcan.info.name = "vcan9";
+    vcan.info.details = "vcan";
+    ImGuiID delete_id = 0;
+    ImGuiID popup_id = 0;
+    const auto draw = [&]
+    {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({0, 0});
+        ImGui::Begin("links");
+        draw_link_buttons(app, vcan);
+        ImGui::PushID(vcan.index); // the ids draw_link_buttons uses
+        delete_id = ImGui::GetID("Delete");
+        popup_id = ImGui::GetID("confirm_delete");
+        ImGui::PopID();
+        ImGui::End();
+        ImGui::EndFrame();
+    };
+    draw();
+    ImGui::ActivateItemByID(delete_id);
+    for (int i = 0; i < 3; ++i)
+    {
+        draw();
+    }
+    CHECK(ImGui::IsPopupOpen(popup_id, ImGuiPopupFlags_None));
+    CHECK_FALSE(app.can_status.link_busy); // no ip command started yet
+
+    ImGuiWindow* popup = ImGui::FindWindowByName(std::format("##Popup_{:08x}", popup_id).c_str());
+    REQUIRE(popup != nullptr);
+    ImGui::ActivateItemByID(ImHashStr("Cancel", 0, popup->ID));
+    for (int i = 0; i < 3; ++i)
+    {
+        draw();
+    }
+    CHECK_FALSE(ImGui::IsPopupOpen(popup_id, ImGuiPopupFlags_None));
+    CHECK_FALSE(app.can_status.link_busy);
 }

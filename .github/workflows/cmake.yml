@@ -60,7 +60,7 @@ jobs:
         ip -brief link show type vcan
 
     - name: Configure
-      run: cmake -S . -B build -G Ninja -DCANGAROO_SANITIZE=ON
+      run: cmake -S . -B build -G Ninja -DKRAKEN_SANITIZE=ON
 
     - name: Build
       run: cmake --build build
@@ -96,7 +96,7 @@ jobs:
     - name: Write samples and read them back
       run: |
         # Every export format and split recorder output, checked by readers that
-        # share no code with cangaroo. See tests/format_compat/validate.py.
+        # share no code with Kraken Explorer. See tests/format_compat/validate.py.
         build/tests/format_compat/trace_format_samples build/format_compat
         .venv/bin/python tests/format_compat/validate.py build/format_compat
 
@@ -133,7 +133,7 @@ jobs:
 
     - name: Build DEB package
       env:
-        CMAKE_ARGS: -DCANGAROO_KVASER=ON
+        CMAKE_ARGS: -DKRAKEN_KVASER=ON
         DEB_MAINTAINER: Schildkroet <https://github.com/Schildkroet>
       run: |
         # libcanlib comes from the linuxcan build above; no Debian package provides it.

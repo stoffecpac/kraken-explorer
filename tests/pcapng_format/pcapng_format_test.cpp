@@ -2,20 +2,20 @@
 
   Copyright (c) 2026 Schildkroet
 
-  This file is part of cangaroo.
+  This file is part of Kraken Explorer.
 
-  cangaroo is free software: you can redistribute it and/or modify
+  Kraken Explorer is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 2 of the License, or
   (at your option) any later version.
 
-  cangaroo is distributed in the hope that it will be useful,
+  Kraken Explorer is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with cangaroo.  If not, see <http://www.gnu.org/licenses/>.
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
@@ -27,7 +27,7 @@
 // (tcpdump.org link-layer types, can_id in network byte order) and
 // <linux/can.h> (CAN_EFF_FLAG 0x80000000, CAN_RTR_FLAG 0x40000000,
 // CAN_ERR_FLAG 0x20000000, CANFD_BRS 0x01, CAN_MTU 16, CANFD_MTU 72).
-// Never from cangaroo output.
+// Never from Kraken Explorer output.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -39,6 +39,7 @@
 
 #include "core/bus_message.h"
 #include "core/pcapng.h"
+#include "core/socket_can.h"
 
 namespace
 {
@@ -95,14 +96,14 @@ TEST_CASE("section header block")
 {
     const Bytes expected = hex(
         "0A0D0D0A"            // block type SHB
-        "2C000000"            // total length 44
+        "34000000"            // total length 52
         "4D3C2B1A"            // byte-order magic, little-endian
         "0100 0000"           // version 1.0
         "FFFFFFFFFFFFFFFF"    // section length unspecified
-        "0400 0800"           // shb_userappl, 8 bytes
-        "43414E6761726F6F"    // "CANgaroo"
+        "0400 0F00"           // shb_userappl, 15 bytes
+        "4B72616B656E204578706C6F726572 00"  // "Kraken Explorer" + 1 pad byte
         "0000 0000"           // opt_endofopt
-        "2C000000");          // total length again
+        "34000000");          // total length again
     Bytes out;
     pcapng_append_section_header(out);
     CHECK(out == expected);
@@ -186,4 +187,16 @@ TEST_CASE("CAN FD frame")
     CHECK(mid(block, 34, 2) == hex("0000"));
     CHECK(mid(block, 36, 48) == data);
     CHECK(mid(block, 84, 16) == Bytes(16, 0)); // unused payload zeroed
+}
+
+TEST_CASE("decode_frame: a remote frame keeps its DLC and no payload (T87b a1 F7)")
+{
+    // struct can_frame (linux/can.h): can_id 0x124 | CAN_RTR_FLAG, can_dlc 3, pad, data garbage
+    const std::uint8_t bytes[16] = {0x24, 0x01, 0x00, 0x40, 3, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0, 0, 0, 0, 0};
+    BusMessage m{};
+    socket_can::decode_frame(bytes, sizeof(bytes), m);
+    CHECK(m.id == 0x124);
+    CHECK(has_flag(m, bus_flag::rtr));
+    CHECK(m.len == 3);
+    CHECK(std::all_of(m.data.begin(), m.data.end(), [](std::uint8_t b) { return b == 0; }));
 }

@@ -287,7 +287,7 @@ TEST_CASE("uds extended multi frame extracts address metadata")
 
 // --- protocol_decode ---
 
-// Issue #38 follow-up: a UDS request CANgaroo transmits itself must decode
+// Issue #38 follow-up: a UDS request Kraken Explorer transmits itself must decode
 // just like one it observes as RX -- a real external device never loops
 // frames back, so the TX side alone has to carry the whole ISO-TP session.
 TEST_CASE("protocol decodes TX on its own")
