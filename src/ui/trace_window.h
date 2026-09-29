@@ -156,6 +156,7 @@ struct TraceWindowState
     int selected = -1;
     bool nav_scroll = false;   // scroll to the selected row when it is drawn next
     bool yank_pending = false; // 'y': copy the selected row's cells when it is drawn next
+    std::vector<VimYankItem> yank_items; // the captured row for vim_yank_menu: [0] whole row, then one per column
     bool focus_filter = false; // '/' pressed: focus the Filter field next frame
     int tab_goto = -1;         // h/l: TraceTab to switch to, -1 = none
 };

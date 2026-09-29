@@ -144,11 +144,6 @@ TEST_CASE("control bar buttons trigger their commands, also when it wraps")
         REQUIRE(click_control_bar(app, "Save", "##icon_text"));
         CHECK(menu_take(app.menu, Command::WorkspaceSave));
 
-        const BusMessage m{.id = 0x123};
-        trace_append(app.trace, {&m, 1});
-        REQUIRE(click_control_bar(app, "Clear", "##icon_text"));
-        CHECK(trace_size(app.trace) == 0); // Trace Clear runs in place
-
         // The Start pill is taller than a normal frame, so the bar is too.
         CHECK(height > ImGui::GetFrameHeight() + 8.0f);
         REQUIRE(click_control_bar(app, "Release the Kraken"));

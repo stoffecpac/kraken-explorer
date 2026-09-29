@@ -4,7 +4,7 @@ _"Deeper than a Peak. Wireshark is stuck in shallow waters."_
 
 **Open-source CAN / CAN FD / LIN / NMEA 2000 bus analyzer for Linux 🐧**
 
-Version 0.0.1.
+Version 0.0.2.
 
 **vs PCAN-Explorer:** the everyday PCAN-Explorer workflow (`.sym` symbol files, instrument panels, signal-based and triggered transmit, XY plots, cycle-time statistics), free, on Linux, with the adapters below.
 
@@ -20,7 +20,6 @@ Version 0.0.1.
 | **CANblaster** | UDP-based remote CAN via [CANblaster](https://github.com/OpenAutoDiagLabs/CANblaster) (enable in Measurement > Driver menu) |
 | **GrIP** | GrIP protocol (CAN, CAN FD, LIN, GPIO) |
 | **lin_usb (LindeAPI)** | USB LIN adapter (VID `0x1d50` / PID `0x606f`). Multi-channel. Master, slave, and monitor modes. Hardware LIN scheduling via LDF. |
-| **aio_usb (aiode)** | Digital I/O and analog inputs on the same USB adapter (VID `0x1d50` / PID `0x606f`), controlled from the GPIO Control window |
 
 ## ⚙️ Features
 
@@ -29,10 +28,9 @@ Version 0.0.1.
 *   **Graphs**: Stacked plots on a shared time axis with up to three Y axes each, legends, cursors with value readout, downsampling and CSV export, plus XY, text and gauge views. CAN and LIN signals. The XY view plots one signal (the **X** radio button in the signal table) against the others, each Y sample paired with the latest X value. The statistics table shows min / max / mean / median of the visible window.
 *   **Instrument Panel** (Window > New > Instrument Panel): gauge, bar, LED, numeric, text and trend displays plus button, slider and checkbox inputs, bound to DBC signals and placed on a grid. **Edit** mode arranges widgets and sets their properties; in **Run** mode inputs send the signal on the chosen interface. Saved with the workspace.
 *   **Filtering & Recording**: Live filters in the trace; record every frame straight to disk (Vector ASC, candump, PCAPng) independent of the in-memory trace size.
-*   **Python Scripting**: Built-in script window with an embedded Python interpreter (pybind11). Send and receive CAN and LIN messages, decode signals using the loaded DBC/LDF files and automate tasks. Example scripts are in `examples/`.
+*   **Python Scripting**: Built-in script window with an embedded Python interpreter (pybind11). Send and receive CAN and LIN messages, decode signals using the loaded DBC/LDF files and automate tasks. Example scripts are in `examples/` (installed to `/usr/share/kraken-explorer/examples/` by the .deb); `tentacle_sim.py` plus `tentacle.dbc` simulate a kraken on a vcan for a first look.
 *   **Transmit**: Generator view with a bit matrix and a per-signal value editor (physical values from the DBC). Each row is sent **Cyclic** (interval), **Manual** (Send button only) or **On receive** (when a given id arrives on a given interface, after an optional delay).
 *   **Trace statistics**: The aggregated trace shows Cycle min / max / mean / median per id; the replay Depth Gauge shows the file's frame-gap min / max / mean / median.
-*   **GPIO Control**: Configure digital lines as inputs or outputs, switch outputs and watch input levels and analog values live on aio_usb and GrIP devices.
 *   **CAN Gateway**: Forward messages between two CAN interfaces with per-message filter rules while a measurement runs.
 *   **LIN Control**: LIN Sleep/Wakeup, schedule table switching, and LIN diagnostic requests and responses on LIN-capable interfaces.
 *   **Trace Replay**: Replay Vector ASC, candump, PCAP and PCAPng logs with adjustable speed, RX/TX direction filtering, channel mapping to live interfaces and optional autoplay with the measurement.
@@ -144,6 +142,27 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
      ```
   2. Configure with `cmake -B build -DKRAKEN_KVASER=ON`.
 
+
+## REST API
+
+`kraken-explorer --api 8321` serves a small HTTP/JSON API on `127.0.0.1:8321` (localhost only;
+use an ssh tunnel from other hosts). Every request runs on the main thread, replies are JSON.
+
+| Route | Effect |
+|---|---|
+| `GET /status` | measuring, recording, record_armed, trace_frames, interfaces (index, driver, name, open, up) |
+| `POST /measurement/start`, `POST /measurement/stop` | like F5 / Shift+F5 |
+| `POST /record {"armed": true}` | arm / disarm recording (Ctrl+R) |
+| `POST /trace/clear` | clear the trace |
+| `POST /trace/save {"path": "out.asc"}` | save the trace (.asc, .candump, .log, .mf4, .pcap, .pcapng, .trc) |
+| `POST /send {"iface": "vcan0", "id": 291, "data": "01 02 03", "extended": false, "fd": false}` | send one frame |
+| `POST /script {"code": "import kraken\nprint(kraken.trace_size())"}` | run Python in the script window (409 while one runs) |
+
+```bash
+curl -s localhost:8321/status
+curl -s -X POST localhost:8321/measurement/start
+curl -s -X POST localhost:8321/send -d '{"iface":"vcan0","id":291,"data":"DE AD"}'
+```
 
 ## Reference adapter firmware
 

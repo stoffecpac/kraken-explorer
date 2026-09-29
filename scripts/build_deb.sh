@@ -25,7 +25,7 @@ rm -rf "$STAGE" "$STAGE.deb"
 install -Dm755 "$BUILD/src/$NAME" "$STAGE/usr/bin/$NAME"
 strip --strip-unneeded "$STAGE/usr/bin/$NAME"
 install -Dm644 "$NAME.desktop" "$STAGE/usr/share/applications/$NAME.desktop"
-install -Dm644 -t "$STAGE/usr/share/$NAME/examples" examples/*.py examples/*.dbc examples/*.ldf examples/*.asc
+install -Dm644 -t "$STAGE/usr/share/$NAME/examples" examples/*
 install -Dm644 "packaging/$NAME.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/$NAME.png"
 install -Dm644 "packaging/10-$NAME-socketcan.rules" "$STAGE/usr/share/polkit-1/rules.d/10-$NAME-socketcan.rules"
 

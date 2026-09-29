@@ -20,6 +20,7 @@
 #include "app.h"
 #include "core/log.h"
 #include "core/png.h"
+#include "core/rest_api.h"
 #include "ui/icons.h"
 #include "ui/settings.h"
 #include "ui/theme.h"
@@ -100,6 +101,7 @@ int main(int argc, char** argv)
     // --workspace FILE: load a .kraken workspace before anything starts.
     // --script FILE: load a Python script into the script window and run it; under --smoke
     //   its console is printed to stderr at exit.
+    // --api PORT: REST API on 127.0.0.1:PORT (docs/manual.md "REST API").
     long smoke_frames = -1;
     bool setup = false;
     bool measure = false;
@@ -108,8 +110,14 @@ int main(int argc, char** argv)
     bool gateway = false;
     const char* workspace = nullptr;
     const char* script = nullptr;
+    long api_port = 0;
     for (int i = 1; i < argc; ++i)
     {
+        if (std::strcmp(argv[i], "--api") == 0 && i + 1 < argc)
+        {
+            api_port = std::strtol(argv[++i], nullptr, 10);
+            continue;
+        }
         if (std::strcmp(argv[i], "--smoke") == 0 && i + 1 < argc)
         {
             smoke_frames = std::strtol(argv[++i], nullptr, 10);
@@ -198,6 +206,11 @@ int main(int argc, char** argv)
     settings_apply_theme(app);
     app.fonts = theme_load_fonts(15.0f * dpi_scale); // ui/font_scale multiplies it via style.FontScaleMain;
     app_init_interfaces(app);
+    RestApi api;
+    if (api_port > 0)
+    {
+        rest_api_start(api, app, static_cast<uint16_t>(api_port)); // logs when the port is taken
+    }
     if (workspace != nullptr)
     {
         workspace_load(app, workspace); // outside a frame, before the measurement starts
@@ -358,7 +371,7 @@ int main(int argc, char** argv)
 
     settings_save(app);
     app.replays.clear(); // joins the replay players; they post tasks (glfwPostEmptyEvent) too
-    gpio_control_close_all(app.gpio); // aiode poll threads call glfwPostEmptyEvent too
+    rest_api_stop(api, app);   // a request in flight still gets its reply
     python_shutdown(app, app.python); // before the interfaces close: the script may still send
     app_measurement_stop(app); // RX threads call glfwPostEmptyEvent: stop them before glfwTerminate
     if (smoke_frames >= 0)

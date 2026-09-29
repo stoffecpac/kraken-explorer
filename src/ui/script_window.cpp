@@ -20,13 +20,13 @@
 namespace
 {
 
-// The bundled example scripts: examples/ next to a source-tree build (build/<dir>/src/../../..),
+// The bundled example scripts: examples/ of a source-tree build (build/src/../..),
 // /usr/share/kraken-explorer/examples when installed; empty (last used dir) when neither exists.
 std::string examples_dir()
 {
     std::error_code ec;
     const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
-    for (const std::filesystem::path dir : {exe.parent_path() / "../../../examples", std::filesystem::path("/usr/share/kraken-explorer/examples")})
+    for (const std::filesystem::path dir : {exe.parent_path() / "../../examples", std::filesystem::path("/usr/share/kraken-explorer/examples")})
     {
         if (std::filesystem::is_directory(dir, ec))
         {

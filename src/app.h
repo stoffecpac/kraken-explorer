@@ -16,7 +16,6 @@
 #include "ui/can_status.h"
 #include "ui/conditional_logging.h"
 #include "ui/dbc_editor.h"
-#include "ui/gpio_control.h"
 #include "ui/lin_control.h"
 #include "ui/log_window.h"
 #include "ui/gateway.h"
@@ -76,7 +75,6 @@ struct App
     std::map<unsigned, LinControl> lin_controls; // key: WorkspaceTab::uid
     std::map<unsigned, InstrumentPanel> instrument_panels; // key: WorkspaceTab::uid; after ifaces (sends on them)
     std::map<unsigned, DbcEditorState> dbc_editors;        // key: WorkspaceTab::uid; edits a copy of a DBC
-    GpioControl gpio;                        // one window: the devices are global (USB / measurement)
     ConditionalLogging conditional_logging;  // fed from the trace every frame
     PyState python;                          // an RX consumer; one interpreter, one script at a time
     ScriptWindowState script;                // the "Python Script" window, shared by every tab

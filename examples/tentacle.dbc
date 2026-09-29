@@ -1,0 +1,83 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: Kraken Explorer
+
+BO_ 256 KrakenStatus: 8 Kraken
+ SG_ Depth : 0|16@1+ (0.1,0) [0|6000] "m" Explorer
+ SG_ HeartRate : 16|8@1+ (1,0) [0|255] "bpm" Explorer
+ SG_ InkLevel : 24|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Mood : 32|4@1+ (1,0) [0|15] "" Explorer
+ SG_ Counter : 36|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 273 Tentacle1: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 274 Tentacle2: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 275 Tentacle3: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 276 Tentacle4: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 277 Tentacle5: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 278 Tentacle6: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 279 Tentacle7: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+BO_ 280 Tentacle8: 8 Kraken
+ SG_ Angle : 0|16@1- (0.01,0) [-180|180] "deg" Explorer
+ SG_ Curl : 16|8@1+ (0.5,0) [0|100] "%" Explorer
+ SG_ Grip : 24|16@1+ (0.1,0) [0|500] "N" Explorer
+ SG_ Suckers : 40|8@1+ (1,0) [0|200] "" Explorer
+ SG_ State : 48|4@1+ (1,0) [0|15] "" Explorer
+
+CM_ BO_ 256 "Kraken body status, 200 ms";
+CM_ BO_ 273 "Tentacle joint data, 50 ms per tentacle (0x111..0x118)";
+
+VAL_ 256 Mood 0 "Sleeping" 1 "Curious" 2 "Hungry" 3 "Angry" 4 "Grabbing" 15 "Error" ;
+VAL_ 273 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 274 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 275 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 276 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 277 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 278 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 279 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;
+VAL_ 280 State 0 "Idle" 1 "Reaching" 2 "Gripping" 3 "Releasing" ;

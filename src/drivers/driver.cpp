@@ -21,7 +21,9 @@
 #include "drivers/driver.h"
 
 #include <array>
+#include <chrono>
 #include <format>
+#include <thread>
 #include <mutex>
 
 #include "core/log.h"
@@ -52,17 +54,52 @@ constexpr const DriverOps* drivers[] = {
 constexpr int listener_batch = 256;
 constexpr int listener_timeout_ms = 100; // bounds the stop latency
 
-void listen(std::stop_token stop, Iface& iface, std::span<const RxConsumer> consumers, void (*wake)())
+// Releases the channel: main thread after the listener stopped, or the listener itself
+// after a read error. send() waits on the same mutex, so it never sees a half-closed channel.
+void iface_close(Iface& iface)
+{
+    std::unique_lock lock(iface.io_mutex);
+    if (iface.open)
+    {
+        iface.ops->close(iface);
+        iface.impl.reset();
+        iface.open = false;
+    }
+}
+
+void listen(std::stop_token stop, Iface& iface, IfaceConfig config, std::span<const RxConsumer> consumers, void (*wake)())
 {
     std::array<BusMessage, listener_batch> buf;
+    config.configure = false; // a reopen must not run `ip link set ...` (pkexec) again
     while (!stop.stop_requested())
     {
         const int n = iface.ops->read(iface, buf.data(), listener_batch, listener_timeout_ms);
         if (n < 0)
         {
-            log_error(std::format("Error on interface: {}, closed", iface.info.name));
+            // Link down or device gone: closed now, opened again once it is back (tried every
+            // second) like a fresh start, so the counters restart from zero. CAN Status shows
+            // "stopped" meanwhile. ponytail: a driver whose open() logs a failure (SLCAN with
+            // the tty unplugged) logs a line per try; give DriverOps a probe if that gets noisy.
+            log_warning(std::format("Interface {} lost (link down or device gone), reopening when it is back", iface.info.name));
             iface.failed = true;
-            return;
+            iface_close(iface);
+            while (!iface.open && !stop.stop_requested())
+            {
+                for (int i = 0; i < 10 && !stop.stop_requested(); ++i) // 1 s, stop latency 100 ms
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(listener_timeout_ms));
+                }
+                std::unique_lock lock(iface.io_mutex);
+                iface.open = !stop.stop_requested() && iface.ops->open(iface, config);
+            }
+            if (!iface.open)
+            {
+                return; // stopped while waiting
+            }
+            iface.total_bits = 0;
+            iface.failed = false;
+            log_info(std::format("Interface {} is back, listening again", iface.info.name));
+            continue;
         }
         if (n == 0)
         {
@@ -210,7 +247,7 @@ int ifaces_start(std::deque<Iface>& ifaces, Setup& setup, std::span<const RxCons
             iface.total_bits = 0;
             log_info(std::format("Listening on interface #{}: {}, version: {}", iface.index, iface.info.name,
                                  iface.info.version));
-            iface.listener = std::jthread(listen, std::ref(iface), consumers, wake);
+            iface.listener = std::jthread(listen, std::ref(iface), si, consumers, wake);
             ++opened;
         }
     }
@@ -253,10 +290,7 @@ void ifaces_stop(std::deque<Iface>& ifaces)
         }
         i.listener.join();
         log_info(std::format("Closing interface: {}", i.info.name));
-        std::unique_lock lock(i.io_mutex);
-        i.ops->close(i);
-        i.impl.reset();
-        i.open = false;
+        iface_close(i);
     }
 }
 

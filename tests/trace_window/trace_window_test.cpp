@@ -533,6 +533,8 @@ TEST_CASE("y copies the selected row's cells to the clipboard, tab-separated")
         {
             draw_frame(app, s, tab); // the row is drawn (and captured) once it is in view
         }
+        ImGui::GetIO().AddInputCharacter('y'); // the copy menu is open: y = the whole row
+        draw_frame(app, s, tab);
         const std::string line = ImGui::GetClipboardText();
         CHECK(line.find("0x200") != std::string::npos);
         CHECK(line.find("AB CD") != std::string::npos);
@@ -610,6 +612,8 @@ std::string yank_after(App& app, TraceWindowState& s, const WorkspaceTab& tab, i
     {
         draw_frame(app, s, tab);
     }
+    ImGui::GetIO().AddInputCharacter('y'); // the copy menu is open: y = the whole row
+    draw_frame(app, s, tab);
     return ImGui::GetClipboardText();
 }
 
@@ -676,6 +680,8 @@ TEST_CASE("y on a Monitor row with DBC signals keeps its Index; expanded signal 
         {
             draw_frame(app, s, tab);
         }
+        ImGui::GetIO().AddInputCharacter('y'); // the copy menu is open: y = the whole row
+        draw_frame(app, s, tab);
         line = ImGui::GetClipboardText();
         CHECK(line.starts_with("1\t"));
         CHECK(line.find("\nSpeed\t7 rpm") != std::string::npos);

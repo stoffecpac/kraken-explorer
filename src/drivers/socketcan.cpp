@@ -335,6 +335,12 @@ bool socketcan_open(Iface& iface, const IfaceConfig& config)
     {
         socketcan_configure(name, config);
     }
+    // A socket bound to a down link only reports ENETDOWN: not managing the link (or reopening
+    // after it went down), stay closed until it is up. Quiet: the listener retries every second.
+    if (!config.configure && !socketcan_link_up(name))
+    {
+        return false;
+    }
 
     const int ifindex = static_cast<int>(if_nametoindex(name.c_str()));
     if (ifindex == 0)

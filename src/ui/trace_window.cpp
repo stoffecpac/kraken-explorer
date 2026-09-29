@@ -605,6 +605,8 @@ constexpr Align column_align(int col)
 // ponytail: cells of columns clipped out of view are skipped by TableSetColumnIndex, so they are
 // not copied either; format the row from data instead if that ever matters.
 std::string* g_yank = nullptr;
+std::vector<VimYankItem>* g_yank_cells = nullptr; // the row's own cells, one item each (column name, text)
+bool g_yank_child = false;                        // in a child row: its cells only go to the line
 
 void yank_cell(std::string_view text)
 {
@@ -615,6 +617,10 @@ void yank_cell(std::string_view text)
             *g_yank += '\t';
         }
         *g_yank += text;
+        if (!g_yank_child)
+        {
+            g_yank_cells->push_back({.label = ImGui::TableGetColumnName(), .text = std::string(text)});
+        }
     }
 }
 
@@ -659,10 +665,12 @@ void yank_finish(Ctx& c)
     }
     if (!c.yank_line.empty())
     {
-        ImGui::SetClipboardText(c.yank_line.c_str());
+        c.s.yank_items[0].text = c.yank_line;
+        c.s.vim.yank_menu = 1; // drawn by draw_trace_window
         c.s.yank_pending = false;
     }
     g_yank = nullptr;
+    g_yank_cells = nullptr;
 }
 
 // Data column in the mono font; bytes set in `changed` in orange (DataColumnDelegate).
@@ -894,6 +902,9 @@ void yank_row(Ctx& c, int r)
     {
         c.yank_line.clear();
         g_yank = &c.yank_line;
+        c.s.yank_items.assign({{.label = "Row"}});
+        g_yank_cells = &c.s.yank_items;
+        g_yank_child = false;
     }
 }
 
@@ -904,6 +915,7 @@ void child_row()
     if (g_yank != nullptr)
     {
         *g_yank += '\n';
+        g_yank_child = true;
     }
 }
 
@@ -1620,6 +1632,7 @@ void draw_trace_window(App& app, TraceWindowState& s, const WorkspaceTab& tab)
         }
         ImGui::EndTabBar();
     }
+    vim_yank_menu(s.vim, s.yank_items);
     s.scroll_pending = false;
     ImGui::End();
 }

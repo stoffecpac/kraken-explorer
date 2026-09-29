@@ -231,7 +231,7 @@ TEST_CASE("error frames are counted per interface from the trace, only the rows 
     CHECK(app.can_status.rows[0].error_frames == 2);
 }
 
-TEST_CASE("an interface whose listener failed shows stopped, not its last state (T87b a2 F9)")
+TEST_CASE("an interface whose listener lost the link shows stopped with counters from zero (T87b a2 F9)")
 {
     Context ctx;
     App app;
@@ -243,7 +243,7 @@ TEST_CASE("an interface whose listener failed shows stopped, not its last state 
     const WorkspaceTab tab{.uid = 3};
     frame(app, tab);
     CHECK(app.can_status.rows[1].stats.state == IfaceState::Stopped);
-    CHECK(app.can_status.rows[1].stats.rx_frames == 300); // last counters kept
+    CHECK(app.can_status.rows[1].stats.rx_frames == 0); // reset: they count from zero once it is back
     CHECK(app.can_status.rows[0].stats.state == IfaceState::Passive); // closed, not failed: unchanged
     app.measuring = false;
     app.ifaces[1].open = false;

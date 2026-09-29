@@ -14,8 +14,8 @@ target_sources(kraken_drivers PRIVATE canblast.cpp)
 target_sources(kraken_drivers PRIVATE socketcan.cpp)
 target_link_libraries(kraken_drivers PRIVATE PkgConfig::LIBNL)
 
-# Vendor interfaces of the 1d50:606f composite adapter: lin_usb (LindeAPI) + aio_usb (aiode GPIO)
-target_sources(kraken_drivers PRIVATE linde/linde.cpp aiode/aiode.cpp usb_vendor/usb_vendor_libusb.cpp)
+# Vendor interface of the 1d50:606f composite adapter: lin_usb (LindeAPI)
+target_sources(kraken_drivers PRIVATE linde/linde.cpp usb_vendor/usb_vendor_libusb.cpp)
 target_link_libraries(kraken_drivers PRIVATE PkgConfig::LIBUSB)
 
 # Kvaser (linuxcan CANlib), opt-in because the SDK is not redistributable.

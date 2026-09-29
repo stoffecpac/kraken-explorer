@@ -3,6 +3,7 @@
 
 #include <array>
 #include <string_view>
+#include <vector>
 
 #include <imgui.h>
 #include <imgui_internal.h> // NavWindow
@@ -151,6 +152,39 @@ TEST_CASE("nothing happens while a text field has the keyboard")
     ctrl(l, ImGuiKey_D);
     CHECK(l.selected == 0);
     CHECK(std::string_view(l.text.data()) == "jG"); // the field got the letters instead
+}
+
+TEST_CASE("copy menu: y copies the whole row, the column's letter copies that column")
+{
+    const UiTest ui;
+    VimNav v;
+    const std::vector<VimYankItem> items = {{"Row", "1\t2\t3"}, {"Rx Frames", "1"}, {"Rx Errors", "2"}, {"Rx Overrun", "3"}};
+    const auto draw = [&]
+    {
+        ImGui::NewFrame();
+        ImGui::Begin("List");
+        vim_yank_menu(v, items);
+        ImGui::End();
+        ImGui::EndFrame();
+    };
+    draw();
+    v.yank_menu = 1;
+    draw();
+    CHECK(v.yank_menu == 2);
+    ImGui::GetIO().AddInputCharacter('x'); // Rx Frames took r, so Rx Errors got x
+    draw();
+    CHECK(v.yank_menu == 0);
+    CHECK(std::string_view(ImGui::GetClipboardText()) == "2");
+    v.yank_menu = 1;
+    draw();
+    ImGui::GetIO().AddInputCharacter('o');
+    draw();
+    CHECK(std::string_view(ImGui::GetClipboardText()) == "3");
+    v.yank_menu = 1;
+    draw();
+    ImGui::GetIO().AddInputCharacter('y');
+    draw();
+    CHECK(std::string_view(ImGui::GetClipboardText()) == "1\t2\t3");
 }
 
 TEST_CASE("pick window: 2x2 grid")

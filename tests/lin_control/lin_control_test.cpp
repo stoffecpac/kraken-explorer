@@ -167,22 +167,18 @@ TEST_CASE("the T31 windows render: LIN Control + diag modal, GPIO Control, Condi
         lc.open = true;
         lc.requests.push_back({.name = "Read Product ID", .nad = 0x7F, .data = {0x22, 0xF1, 0x90}});
         diag_dialog_open(lc.dialog, &lc.requests[0]);
-        app.gpio.open = true;
         conditional_logging_open(app.conditional_logging);
         for (int i = 0; i < 3; ++i)
         {
             ImGui::NewFrame();
             draw_lin_control(app, tab, lc);
-            draw_gpio_control(app, app.gpio);
             conditional_logging_frame(app, app.conditional_logging);
             draw_conditional_logging(app, app.conditional_logging);
             ImGui::EndFrame();
         }
         CHECK(ImGui::FindWindowByName(workspace_window_name(tab, "LIN Control").c_str()) != nullptr);
-        CHECK(ImGui::FindWindowByName("GPIO Control") != nullptr);
         CHECK(ImGui::FindWindowByName("Conditional Logging Configuration") != nullptr);
         CHECK(lc.dialog.open);
-        gpio_control_close_all(app.gpio);
     }
     ImGui::DestroyContext();
 }

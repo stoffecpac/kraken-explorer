@@ -16,7 +16,8 @@ struct WorkspaceTab;
 // Last values of one interface; kept after the measurement stops, like the old tree rows.
 struct CanStatusRow
 {
-    IfaceStats stats;
+    IfaceStats stats;  // since the interface was (re)opened: the cumulative counters minus base
+    IfaceStats base;   // the driver's counters at the first poll after the (re)open
     uint64_t bits = 0;
     uint64_t load_bits = 0; // total_bits at load_time
     std::chrono::steady_clock::time_point load_time{};
@@ -59,6 +60,7 @@ struct CanStatusState
     int selected = -1;      // Iface::index of the selected row, -1 = none
     float fit_width = 0.0f; // width the table needs to show every column; the default layout sizes the left column by it
     VimNav vim;
+    std::vector<VimYankItem> yank_items; // vim_yank_menu: [0] whole row, then one per column
 };
 
 // Rebuilds s.order from ifaces by s.sort_key / s.sort_desc (ties: Iface::index); interfaces

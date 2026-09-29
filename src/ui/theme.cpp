@@ -115,7 +115,7 @@ struct Palette
 
 // "Abyss": deep blue-teal water, bioluminescent teal accent, sea-foam text.
 static constexpr Palette abyss = {
-    .text = 0xd8f3ef, .text_dim = 0x6f9ca1, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x0c262e,
+    .text = 0xd8f3ef, .text_dim = 0x6f9ca1, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x123640,
     .popup = 0x08191e, .frame = 0x10303a, .frame_hov = 0x16414d, .frame_act = 0x1b5260,
     .title = 0x08191e, .title_act = 0x0e2e36, .button = 0x123843, .border = 0x1e4a55,
     .grid = 0x143640, .accent = 0x19d3c5, .accent_hi = 0x5ff0e4, .select = 0x0f6b73,
@@ -128,7 +128,7 @@ static constexpr Palette abyss = {
 // "Shallow water": pale sand and sea glass, the teal darkened until it reads on white: text_dim and
 // accent >= 4.5:1, border >= 3:1 on the popup / field colour (frames get a border here, see theme_apply).
 static constexpr Palette shallows = {
-    .text = 0x0b2a30, .text_dim = 0x566865, .bg = 0xf3eee2, .deep = 0xfdfbf6, .alt = 0xeef6f3,
+    .text = 0x0b2a30, .text_dim = 0x566865, .bg = 0xf3eee2, .deep = 0xfdfbf6, .alt = 0xe3efea,
     .popup = 0xfdfbf6, .frame = 0xfdfbf6, .frame_hov = 0xdcf2ee, .frame_act = 0xbfe8e3,
     .title = 0xe6dfcf, .title_act = 0xd6e9e4, .button = 0xe9f1ec, .border = 0x7d948f,
     .grid = 0xd9e3df, .accent = 0x08727c, .accent_hi = 0x055860, .select = 0x19d3c5,
@@ -175,13 +175,15 @@ static void apply_palette(ImVec4* c, bool dark, const Palette& p)
     c[ImGuiCol_ResizeGripHovered] = rgb(p.accent, 0.6f);
     c[ImGuiCol_ResizeGripActive] = rgb(p.accent);
     c[ImGuiCol_InputTextCursor] = rgb(p.accent_hi);
+    // Selected tab: the lighter field colour under a full accent overline, whether or not the
+    // tab bar has focus; unselected tabs stay title-dark.
     c[ImGuiCol_Tab] = rgb(p.title);
     c[ImGuiCol_TabHovered] = rgb(p.frame_hov);
-    c[ImGuiCol_TabSelected] = rgb(p.deep);
+    c[ImGuiCol_TabSelected] = rgb(p.frame_act);
     c[ImGuiCol_TabSelectedOverline] = rgb(p.accent);
     c[ImGuiCol_TabDimmed] = rgb(p.title);
-    c[ImGuiCol_TabDimmedSelected] = rgb(p.alt);
-    c[ImGuiCol_TabDimmedSelectedOverline] = rgb(p.accent, 0.5f);
+    c[ImGuiCol_TabDimmedSelected] = rgb(p.frame_act);
+    c[ImGuiCol_TabDimmedSelectedOverline] = rgb(p.accent);
     c[ImGuiCol_DockingPreview] = rgb(p.accent, 0.5f);
     c[ImGuiCol_DockingEmptyBg] = rgb(p.bg);
     c[ImGuiCol_PlotLines] = rgb(p.accent);
@@ -307,6 +309,7 @@ void theme_apply(bool dark)
     style.ScrollbarRounding = 6.0f;
     style.GrabRounding = 4.0f;
     style.TabRounding = 5.0f;
+    style.TabBarOverlineSize = 3.0f; // the selected tab's accent line, thick enough to spot
     // Flat: no frame around buttons and fields, a little more air (T79h, "looked like Qt").
     style.FrameBorderSize = dark ? 0.0f : 1.0f; // light: field == popup colour, only the border shows it
     style.WindowBorderSize = 0.0f;

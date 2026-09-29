@@ -32,6 +32,7 @@ struct Fake
     std::atomic<int> sent{0};
     std::atomic<int> reads{0};
     std::atomic<int> consumed{0};
+    std::atomic<bool> fail{false}; // next read reports the channel gone
 };
 Fake fake;
 
@@ -44,6 +45,10 @@ const DriverOps fake_driver = {
     .read =
         [](Iface& iface, BusMessage* out, int max, int timeout_ms)
     {
+        if (fake.fail.exchange(false))
+        {
+            return -1;
+        }
         if (fake.reads++ == 0 && max >= 3)
         {
             for (int i = 0; i < 3; ++i)
@@ -160,6 +165,38 @@ TEST_CASE("default setup leaves out interfaces that are down")
     CHECK(setup.networks[0].interfaces[0].name == "up0");
     CHECK(setup.networks[1].name == "Network 2");
     CHECK(setup.networks[1].interfaces[0].name == "up1");
+}
+
+TEST_CASE("a read error closes the interface and the listener reopens it a second later")
+{
+    fake.opened = 0;
+    fake.closed = 0;
+    fake.reads = 1; // no first-read batch
+    std::deque<Iface> ifaces;
+    auto& i = ifaces.emplace_back();
+    i.ops = &fake_driver;
+    i.info.name = "fake0";
+    Setup setup;
+    setup.networks.push_back({.interfaces = {{.driver = "Fake", .name = "fake0"}}});
+    REQUIRE(ifaces_start(ifaces, setup, {}, nullptr) == 1);
+    const auto wait_failed = [&](bool failed)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (i.failed != failed && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return i.failed == failed;
+    };
+    fake.fail = true;
+    REQUIRE(wait_failed(true));
+    CHECK(fake.closed == 1);
+    CHECK_FALSE(iface_send(i, BusMessage{})); // closed meanwhile
+    REQUIRE(wait_failed(false));
+    CHECK(fake.opened == 2);
+    CHECK(iface_send(i, BusMessage{}));
+    ifaces_stop(ifaces);
+    CHECK(fake.closed == 2);
 }
 
 TEST_CASE("SocketCAN on vcan0: RX from another socket, TX echo, error frames")

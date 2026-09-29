@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <format>
 #include <string_view>
 #include <utility>
@@ -60,11 +61,44 @@ bool window_dir(VimDir& dir)
     }
 }
 
+// The list's window or a child of it has focus. NoPopupHierarchy: an open popup (the copy
+// menu) takes the keys away from the list under it.
+bool list_focused()
+{
+    return ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows | ImGuiFocusedFlags_NoPopupHierarchy);
+}
+
+// Menu letter of every item: y for the first, else the first letter of the label not taken
+// yet ("Rx Frames" r, "Rx Errors" x, "Rx Overrun" o), 0 when the label has none left.
+std::string yank_keys(std::span<const VimYankItem> items)
+{
+    std::string keys(items.size(), '\0');
+    std::string used = "y";
+    for (std::size_t i = 1; i < items.size(); ++i)
+    {
+        for (const char ch : items[i].label)
+        {
+            const char k = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (std::isalpha(static_cast<unsigned char>(k)) && used.find(k) == std::string::npos)
+            {
+                keys[i] = k;
+                used += k;
+                break;
+            }
+        }
+    }
+    if (!items.empty())
+    {
+        keys[0] = 'y';
+    }
+    return keys;
+}
+
 } // namespace
 
 bool vim_nav(VimNav& v, int& selected, int count, int page_rows, bool& focus_search, int& h_delta)
 {
-    if (!listening() || !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+    if (!listening() || !list_focused())
     {
         return false;
     }
@@ -165,7 +199,7 @@ int vim_pick_window(std::span<const VimRect> rects, int from, VimDir dir) noexce
 
 bool vim_yank()
 {
-    if (!listening() || !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+    if (!listening() || !list_focused())
     {
         return false;
     }
@@ -177,6 +211,68 @@ bool vim_yank()
     }
     q.erase(it);
     return true;
+}
+
+void vim_yank_menu(VimNav& v, std::span<const VimYankItem> items)
+{
+    if (v.yank_menu == 1)
+    {
+        ImGui::OpenPopup("##yank");
+        v.yank_menu = 2;
+    }
+    if (v.yank_menu != 2)
+    {
+        return;
+    }
+    const ImVec2 pos = ImGui::GetWindowPos();
+    ImGui::SetNextWindowPos(ImVec2(pos.x, pos.y + ImGui::GetWindowSize().y), ImGuiCond_Appearing, ImVec2(0.0f, 1.0f));
+    if (!ImGui::BeginPopup("##yank")) // Esc / click outside closed it
+    {
+        v.yank_menu = 0;
+        return;
+    }
+    const std::string keys = yank_keys(items);
+    int pick = -1;
+    for (const ImWchar c : ImGui::GetIO().InputQueueCharacters)
+    {
+        if (const auto it = std::find(keys.begin(), keys.end(), static_cast<char>(c)); c < 128 && it != keys.end())
+        {
+            pick = static_cast<int>(it - keys.begin());
+        }
+    }
+    ImGui::TextDisabled("Copy");
+    if (ImGui::BeginTable("##items", 3, ImGuiTableFlags_SizingFixedFit))
+    {
+        for (std::size_t i = 0; i < items.size(); ++i)
+        {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::Selectable("##pick", false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
+            {
+                pick = static_cast<int>(i);
+            }
+            ImGui::PopID();
+            ImGui::SameLine();
+            ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_CheckMark), "%c", keys[i] != '\0' ? keys[i] : ' ');
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(items[i].label.c_str());
+            ImGui::TableNextColumn();
+            // One line of the text, cut at ~40 characters; the clipboard gets all of it.
+            const std::string_view text = items[i].text;
+            const std::size_t end = std::min(text.find('\n'), std::size_t{40});
+            ImGui::TextDisabled("%.*s%s", static_cast<int>(std::min(end, text.size())), text.data(), end < text.size() ? "…" : "");
+        }
+        ImGui::EndTable();
+    }
+    if (pick >= 0)
+    {
+        ImGui::SetClipboardText(items[static_cast<std::size_t>(pick)].text.c_str());
+        ImGui::GetIO().InputQueueCharacters.resize(0); // the letter was the menu's, not the list's
+        ImGui::CloseCurrentPopup();
+        v.yank_menu = 0;
+    }
+    ImGui::EndPopup();
 }
 
 void vim_window_nav(VimNav& v, unsigned tab_uid)

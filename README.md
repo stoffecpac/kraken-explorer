@@ -8,8 +8,9 @@ Fork of [CANgaroo](https://github.com/Schildkroet/CANgaroo).
 
 [![Kraken Explorer in the dark theme: trace, live graph and CAN status](docs/view.png)](docs/demo.mp4)
 
-▶ [Demo video (40 s)](docs/demo.mp4): live trace, time series, instrument panel, gauges, cursors
-and statistics on five simulated buses.
+▶ [Demo video (40 s)](docs/demo.mp4): live trace with DBC-decoded signals, time series from the
+Ctrl+P signal finder, the vim copy menu and the keyboard overlay, on a simulated bus
+(`examples/tentacle_sim.py` + `examples/tentacle.dbc`).
 
 ```bash
 cmake -S . -B build -G Ninja && cmake --build build --target kraken-explorer

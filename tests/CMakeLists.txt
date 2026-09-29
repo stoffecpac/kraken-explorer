@@ -6,7 +6,7 @@ foreach(src IN LISTS test_sources)
     cmake_path(GET src PARENT_PATH dir)
     cmake_path(GET dir FILENAME area)
     add_executable(${area}_test ${src})
-    target_link_libraries(${area}_test PRIVATE doctest::doctest kraken_ui kraken_db kraken_serial util)
+    target_link_libraries(${area}_test PRIVATE doctest::doctest kraken_ui kraken_db kraken_serial kraken_app util)
     target_include_directories(${area}_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}) # #include "ui_test.h"
     set_target_properties(${area}_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${area})
     add_test(NAME ${area} COMMAND ${area}_test)

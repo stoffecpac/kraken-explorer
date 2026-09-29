@@ -1,6 +1,8 @@
 #pragma once
 
 #include <span>
+#include <string>
+#include <vector>
 
 // Vim motions for list-like windows and for moving focus between the windows of a tab.
 // No <imgui.h> here: file_dialog.h (and through it app.h) includes this header.
@@ -22,13 +24,21 @@ inline constexpr VimKey vim_keys[] = {
     {"Ctrl+w h/j/k/l", "Same, vim style"},
     {"Ctrl+w w", "Focus the next window"},
     {"1 - 9", "Switch to workspace tab N"},
-    {"y", "Copy the selected row"},
+    {"y", "Copy menu for the selected row: y = whole row, letter = one column"},
 };
 
 struct VimNav
 {
     double g_time = -1.0; // ImGui::GetTime() of a first 'g' waiting for the second, -1 = none
     double w_time = -1.0; // time of Ctrl+w waiting for h/j/k/l/w (vim_window_nav), -1 = none
+    int yank_menu = 0;    // vim_yank_menu: 1 = open it next call, 2 = open, 0 = closed
+};
+
+// One thing the copy menu offers: its column label and the text that goes to the clipboard.
+struct VimYankItem
+{
+    std::string label;
+    std::string text;
 };
 
 // Call inside the list's window (or its table) every frame. selected is clamped to
@@ -39,6 +49,12 @@ bool vim_nav(VimNav& v, int& selected, int count, int page_rows, bool& focus_sea
 
 // True once when 'y' was typed in the focused window (no text field active); the key is consumed.
 [[nodiscard]] bool vim_yank();
+
+// Which-key style copy menu (nvim's y + motion): a popup at the bottom of the current window
+// listing items, y copies the first (the whole row), the shown letter copies that item, Esc or
+// a click outside closes. Set v.yank_menu = 1 with the items ready, then call every frame from
+// the same window; the popup stays until v.yank_menu is 0 again.
+void vim_yank_menu(VimNav& v, std::span<const VimYankItem> items);
 
 struct VimRect
 {

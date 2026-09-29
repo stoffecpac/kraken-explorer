@@ -255,11 +255,6 @@ void app_frame(App& app)
             draw_dbc_editor(app, it->second, *tab);
         }
     }
-    if (menu_take(app.menu, Command::NewGpioControl))
-    {
-        app.gpio.open = true;
-    }
-    draw_gpio_control(app, app.gpio);
     if (menu_take(app.menu, Command::ConditionalLogging))
     {
         conditional_logging_open(app.conditional_logging);

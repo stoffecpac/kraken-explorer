@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <imgui.h>
+#include <implot.h> // IMPLOT_VERSION for About
 #include <imgui_internal.h> // BeginViewportSideBar, GetKeyChordName
 
 #include "app.h"
@@ -52,7 +53,6 @@ constexpr std::array<CommandInfo, static_cast<std::size_t>(Command::Count)> comm
     {"LIN Control"},
     {"Instrument Panel"},
     {"DBC Editor"},
-    {"GPIO Control"},
     {"Standalone Graph", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_B},
     {"Gateway"},
     {"Conditional Logging..."},
@@ -215,7 +215,7 @@ void draw_menu_bar(App& app)
     {
         if (ImGui::BeginMenu("New"))
         {
-            for (auto cmd = Command::NewTraceView; cmd <= Command::NewGpioControl;
+            for (auto cmd = Command::NewTraceView; cmd <= Command::NewDbcEditor;
                  cmd = static_cast<Command>(static_cast<int>(cmd) + 1))
             {
                 if (cmd != Command::NewGraphWidget) // same window as Graph View; listing both showed it twice
@@ -290,6 +290,7 @@ void draw_record_button(App& app)
         theme_push_button(theme_stop_button()); // armed: the coral Stop style
     }
     command_button(app, Command::Record, Icon::Record, "Record");
+    const float left = ImGui::GetItemRectMin().x;
     ImGui::SameLine(0.0f, 0.0f);
     if (ImGui::ArrowButton("##record_menu", ImGuiDir_Down))
     {
@@ -300,6 +301,7 @@ void draw_record_button(App& app)
     {
         theme_pop_button();
     }
+    ImGui::SetNextWindowPos(ImVec2(left, ImGui::GetItemRectMax().y)); // under the button, not at the mouse
     if (ImGui::BeginPopup("##record_popup"))
     {
         menu_item(app, Command::RecordingOptions);
@@ -391,8 +393,6 @@ void draw_control_bar(App& app)
         command_button(app, Command::Setup, Icon::PreferencesSystem, setup);
         same_line_or_wrap(command_button_width("Record") + ImGui::GetFrameHeight());
         draw_record_button(app);
-        same_line_or_wrap(command_button_width("Clear"));
-        command_button(app, Command::TraceClear, Icon::EditClear, "Clear");
         same_line_or_wrap(button_width("Gateway"));
         ImGui::BeginDisabled(!enabled(app, Command::Gateway));
         if (ImGui::Button("Gateway"))
@@ -436,14 +436,12 @@ void draw_about(App& app)
         ImGui::Spacing();
         theme_logo(font * 6.0f);
         ImGui::SameLine(0.0f, font * 1.5f);
-        ImGui::BeginGroup();
-        ImGui::PushFont(nullptr, font * 1.8f);
-        ImGui::TextUnformatted("Kraken Explorer: Day of the N2K Tentacle");
-        ImGui::PopFont();
-        ImGui::TextDisabled("Deeper than a Peak. Wireshark is stuck in shallow waters.");
-        ImGui::Spacing();
+        ImGui::BeginGroup(); // name and slogan are in the window title already
         ImGui::Text("Version " VERSION_STRING "   \xc2\xb7   %.1f fps (%.2f ms/frame)", fps,
                     fps > 0.0f ? 1000.0f / fps : 0.0f);
+        ImGui::TextDisabled("Dear ImGui %s (docking)   \xc2\xb7   ImPlot %s   \xc2\xb7   GLFW / OpenGL 3", IMGUI_VERSION, IMPLOT_VERSION);
+        ImGui::Spacing();
+        ImGui::TextWrapped("Others chase the peak and float off into the cloud. The Kraken goes to the bottom of things.");
         ImGui::EndGroup();
         ImGui::Spacing();
         ImGui::Separator();

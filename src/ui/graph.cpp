@@ -1197,6 +1197,10 @@ void draw_find_signal(App& app, const WorkspaceTab& tab, GraphState& g)
     {
         return;
     }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) // one Esc closes, even from inside the search field
+    {
+        ImGui::CloseCurrentPopup();
+    }
     ImGui::TextUnformatted("Find signal");
     ImGui::SetNextItemWidth(-FLT_MIN);
     const SignalEntry* hit = signal_search_input(g.palette, app.setup, "Message.Signal...", g.palette_query, ImGui::IsWindowAppearing());

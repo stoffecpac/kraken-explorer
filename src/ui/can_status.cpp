@@ -182,19 +182,29 @@ void poll(App& app, CanStatusState& s)
     for (auto& iface : app.ifaces)
     {
         CanStatusRow& row = s.rows[iface.index];
-        if (iface.failed) // the listener gave up (link down, device gone): the counters are frozen
+        if (iface.failed) // link down or device gone: the listener reopens it when it is back
         {
-            row.stats.state = IfaceState::Stopped;
+            row = {.stats = {.state = IfaceState::Stopped}, .seen = true}; // counters from zero again then
             continue;
         }
-        if (!iface_stats(iface, row.stats))
+        IfaceStats stats;
+        if (!iface_stats(iface, stats))
         {
             continue; // closed: keep the last values
         }
-        row.bits = iface.total_bits.load(std::memory_order_relaxed);
-        if (!row.seen)
+        const uint64_t bits = iface.total_bits.load(std::memory_order_relaxed);
+        if (!row.seen || row.load_time == std::chrono::steady_clock::time_point{}) // first poll after the (re)open
         {
-            row = {.stats = row.stats, .bits = row.bits, .load_bits = row.bits, .load_time = now, .seen = true};
+            row = {.base = stats, .bits = bits, .load_bits = bits, .load_time = now, .seen = true};
+        }
+        row.stats = stats;
+        row.stats.rx_frames -= row.base.rx_frames; // the cumulative ones; rx/tx_errors are the controller's counters
+        row.stats.tx_frames -= row.base.tx_frames;
+        row.stats.rx_overruns -= row.base.rx_overruns;
+        row.stats.tx_dropped -= row.base.tx_dropped;
+        row.bits = bits;
+        if (row.load_time == now)
+        {
             continue;
         }
         const auto dt = std::chrono::duration<double>(now - row.load_time).count();
@@ -567,7 +577,7 @@ void draw_can_status(App& app, CanStatusState& s, const WorkspaceTab& tab)
         {
             s.selected = s.order[static_cast<std::size_t>(cur)];
         }
-        if (cur >= 0 && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput
+        if (cur >= 0 && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows | ImGuiFocusedFlags_NoPopupHierarchy) && !ImGui::GetIO().WantTextInput
             && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)
                 || ImGui::IsKeyPressed(ImGuiKey_Space, false)))
         {
@@ -577,6 +587,38 @@ void draw_can_status(App& app, CanStatusState& s, const WorkspaceTab& tab)
                 toggle_link(app, iface);
             }
         }
+        if (cur >= 0 && vim_yank())
+        {
+            const uint16_t index = s.order[static_cast<std::size_t>(cur)];
+            const Iface& iface = app.ifaces[index];
+            std::vector<VimYankItem>& items = s.yank_items;
+            items.assign({{.label = "Row"},
+                          {.label = "Driver", .text = iface.ops ? iface.ops->name : ""},
+                          {.label = "Interface", .text = iface.info.name},
+                          {.label = "Bitrate", .text = index < s.bitrate.size() ? s.bitrate[index] : no_bitrate}});
+            if (index < s.rows.size() && s.rows[index].seen)
+            {
+                const CanStatusRow& row = s.rows[index];
+                items.push_back({.label = "State", .text = iface_state_name(row.stats.state)});
+                const std::pair<const char*, uint64_t> counters[] = {
+                    {"Rx Frames", row.stats.rx_frames}, {"Rx Errors", row.stats.rx_errors},
+                    {"Rx Overrun", row.stats.rx_overruns}, {"Error Frames", row.error_frames},
+                    {"Tx Frames", row.stats.tx_frames}, {"Tx Errors", row.stats.tx_errors},
+                    {"Tx Dropped", row.stats.tx_dropped}};
+                for (const auto& [label, value] : counters)
+                {
+                    items.push_back({.label = label, .text = std::to_string(value)});
+                }
+                items.push_back({.label = "Load (%)", .text = row.load});
+                items.push_back({.label = "Bits", .text = std::to_string(row.bits)});
+            }
+            for (std::size_t i = 1; i < items.size(); ++i)
+            {
+                items[0].text += (i > 1 ? "\t" : "") + items[i].text;
+            }
+            s.vim.yank_menu = 1;
+        }
+        vim_yank_menu(s.vim, s.yank_items);
 
         ImGui::TableHeadersRow();
         const auto right = [](const std::string& text)
