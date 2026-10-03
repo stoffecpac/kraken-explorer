@@ -1,7 +1,6 @@
 #pragma once
 
-// Minimal PNG writer for screenshots: RGBA8, rows top-down, zlib "stored" blocks (no
-// compression: a graph capture is a few MB at most and no extra dependency is needed).
+// Minimal PNG writer for graph exports: RGBA8, rows top-down, filter Up, zlib deflate.
 
 #include <cstdint>
 #include <filesystem>

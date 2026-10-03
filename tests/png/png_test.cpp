@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include <zlib.h>
+
 #include "core/png.h"
 
 namespace
@@ -17,7 +19,7 @@ uint32_t be32(const std::vector<uint8_t>& v, std::size_t i)
 }
 } // namespace
 
-TEST_CASE("png_encode: signature, IHDR, one stored zlib block, IEND")
+TEST_CASE("png_encode: signature, IHDR, deflated IDAT that inflates to the filtered rows, IEND")
 {
     const std::vector<uint8_t> rgba = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}; // 2x2
     const std::vector<uint8_t> png = png_encode(2, 2, rgba);
@@ -29,18 +31,26 @@ TEST_CASE("png_encode: signature, IHDR, one stored zlib block, IEND")
     CHECK(be32(png, 20) == 2);
     CHECK(png[24] == 8); // bit depth
     CHECK(png[25] == 6); // RGBA
-    // IDAT: zlib header (2) + stored block header (5) + 2 rows of (1 filter + 8 bytes) + adler (4)
     const std::size_t idat = 8 + 25;
-    CHECK(be32(png, idat) == 2 + 5 + 18 + 4);
+    const uint32_t len = be32(png, idat);
     CHECK(std::string(png.begin() + static_cast<std::ptrdiff_t>(idat + 4), png.begin() + static_cast<std::ptrdiff_t>(idat + 8)) == "IDAT");
-    CHECK(png[idat + 8] == 0x78);
-    CHECK(png[idat + 10] == 1);  // final stored block
-    CHECK(png[idat + 11] == 18); // LEN
-    CHECK(png[idat + 13] == static_cast<uint8_t>(~18));
-    CHECK(png[idat + 15] == 0);   // filter None
-    CHECK(png[idat + 16] == 255); // first pixel R
+    // CRC of type + data, as every reader checks.
+    CHECK(be32(png, idat + 8 + len) == crc32(0, png.data() + idat + 4, len + 4));
+    std::vector<uint8_t> raw(2 * 9);
+    uLongf raw_len = static_cast<uLongf>(raw.size());
+    REQUIRE(uncompress(raw.data(), &raw_len, png.data() + idat + 8, len) == Z_OK);
+    REQUIRE(raw_len == 18);
+    CHECK(raw[0] == 0);   // row 0: filter None
+    CHECK(raw[1] == 255); // first pixel R
+    CHECK(raw[9] == 2);   // row 1: filter Up, bytes are differences to row 0
+    CHECK(static_cast<uint8_t>(raw[10] + rgba[0]) == rgba[8]);
     CHECK(std::string(png.end() - 8, png.end() - 4) == "IEND");
-    CHECK(png.size() == idat + 12 + 29 + 12);
+}
+
+TEST_CASE("png_encode: a flat 4K image stays small")
+{
+    const std::vector<uint8_t> rgba(std::size_t{3840} * 2160 * 4, 0x20);
+    CHECK(png_encode(3840, 2160, rgba).size() < 200'000);
 }
 
 TEST_CASE("png_write_file writes the bytes and reports an unwritable path")

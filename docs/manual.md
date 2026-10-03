@@ -14,7 +14,7 @@ Version 0.0.2.
 | :--- | :--- |
 | **SocketCAN** | Any kernel CAN interface (`can0`, `vcan0`, …) |
 | **PEAK PCAN** | PCAN-USB, PCAN-USB Pro, PCAN-PCIe, … through SocketCAN (`peak_usb` / `peak_pci` kernel drivers) |
-| **Kvaser** | USB/CAN Leaf and other Kvaser devices via CANlib SDK (`-DKRAKEN_KVASER=ON`) |
+| **Kvaser** | Leaf, USBcan and other Kvaser devices: natively through CANlib when linuxcan is installed (CAN FD included), or as SocketCAN through the kernel's `kvaser_usb` driver |
 | **Candlelight / CANable / CANnectivity** | gs_usb devices (CANable with Candlelight firmware, MKS CANable, cantact, CANnectivity, …). Via SocketCAN (`gs_usb` kernel driver) |
 | **SLCAN** | CANable (SLCAN firmware), WeAct, Arduino CAN shields |
 | **CANblaster** | UDP-based remote CAN via [CANblaster](https://github.com/OpenAutoDiagLabs/CANblaster) (enable in Measurement > Driver menu) |
@@ -24,21 +24,68 @@ Version 0.0.2.
 ## ⚙️ Features
 
 *   **Real-time CAN/CAN-FD/LIN Decoding**: Standard CAN, CAN FD and LIN frames, with UDS and J1939 protocol views in the trace.
-*   **DBC, SYM & LDF Database Support**: Load multiple `.dbc` or PEAK PCAN Symbol Editor `.sym` files (FormatVersion 5.0/6.0: enums, multiplexed symbols, `{SIGNALS}` references) for CAN signal decoding and `.ldf` files for LIN signal decoding. `.sym` limits: float/double signals decode as raw integers, an id range uses its first id only.
-*   **Graphs**: Stacked plots on a shared time axis with up to three Y axes each, legends, cursors with value readout, downsampling and CSV export, plus XY, text and gauge views. CAN and LIN signals. The XY view plots one signal (the **X** radio button in the signal table) against the others, each Y sample paired with the latest X value. The statistics table shows min / max / mean / median of the visible window.
+*   **DBC, DBF, SYM & LDF Database Support**: Load multiple `.dbc`, BUSMASTER `.dbf` (database version 1.3) or PEAK PCAN Symbol Editor `.sym` files (FormatVersion 5.0/6.0: enums, multiplexed symbols, `{SIGNALS}` references) for CAN signal decoding and `.ldf` files for LIN signal decoding. `.sym` limits: float/double signals decode as raw integers, an id range uses its first id only.
+*   **Graphs**: Stacked plots on a shared time axis with up to three Y axes each, legends, cursors with value readout, downsampling and CSV export, plus XY, text and gauge views. CAN and LIN signals. The XY view plots one signal (the **X** radio button in the signal table) against the others, each Y sample paired with the latest X value. The statistics table shows min / max / mean / median of the visible window. The time axis reads as `h:mm:ss` (a window shorter than a day leaves out the day). With a loaded file the graph decodes only the visible time window (see [Large logs](#large-logs-and-the-frame-cache)), draws the Log's position as a vertical line, follows the Log when it leaves the window, and a click in the plot puts the Log on that time.
+*   **Graph PNG export** (Export to PNG... under the signal list): renders the graph again off screen at any size, independent of the window: as on screen, 720p, Full HD, 1440p, 4K or custom (up to 8192 px). Text and lines scale with it (auto: 1x per ~900 px height, or 1x to 3x). Styles: **Kraken** (the app's theme with a deep-sea glow), **Light**, **Print** (white, bolder curves; both darken the signal colours for contrast) and **Transparent** (for slides). A title (default: the signal names), the time range and signal count under it, legend, cursors with their values and a Kraken Explorer watermark, each optional. Axes and cursors match the screen; the file is a deflated RGBA PNG (a 4K graph is about 0.5 MB). Works for the time series, XY, text and gauge views, also in a graph window of its own.
+*   **Signal search**: One fuzzy finder for the Graph search box, the Instrument Panel picker, the Ctrl+P "Find signal" palette and Value Search. Scored like fzf: the query's characters in order, word starts, camelCase humps and runs rank first. Recently picked signals (the last 16, any box) rank first among equal matches.
+*   **Value Search** (a tab next to Log and Python Script): *Signal* mode picks a signal (fuzzy) and a value range and lists every sample inside it, one row each (time, value, index); picking the signal prefills the range with the values it takes in the trace and shows the DBC range, empty bounds are open. *Raw* mode searches frames by id and / or a data byte pattern from byte 0 (`01 ?? FF`, `??` = any byte, shorter patterns leave the rest free). A click on a hit shows that frame in the Trace window as it is (the Log row, or the id's row in the aggregated Monitor) and, for a signal, the Graph around it with both cursors on the sample. A file view scans on a worker thread with a progress figure; CAN only.
 *   **Instrument Panel** (Window > New > Instrument Panel): gauge, bar, LED, numeric, text and trend displays plus button, slider and checkbox inputs, bound to DBC signals and placed on a grid. **Edit** mode arranges widgets and sets their properties; in **Run** mode inputs send the signal on the chosen interface. Saved with the workspace.
-*   **Filtering & Recording**: Live filters in the trace; record every frame straight to disk (Vector ASC, candump, PCAPng) independent of the in-memory trace size.
+*   **Filtering & Recording**: Live filters in the trace; record every frame straight to disk (Vector ASC, candump, PCAPng, PEAK TRC) independent of the in-memory trace size.
 *   **Python Scripting**: Built-in script window with an embedded Python interpreter (pybind11). Send and receive CAN and LIN messages, decode signals using the loaded DBC/LDF files and automate tasks. Example scripts are in `examples/` (installed to `/usr/share/kraken-explorer/examples/` by the .deb); `tentacle_sim.py` plus `tentacle.dbc` simulate a kraken on a vcan for a first look.
 *   **Transmit**: Generator view with a bit matrix and a per-signal value editor (physical values from the DBC). Each row is sent **Cyclic** (interval), **Manual** (Send button only) or **On receive** (when a given id arrives on a given interface, after an optional delay).
 *   **Trace statistics**: The aggregated trace shows Cycle min / max / mean / median per id; the replay Depth Gauge shows the file's frame-gap min / max / mean / median.
-*   **CAN Gateway**: Forward messages between two CAN interfaces with per-message filter rules while a measurement runs.
 *   **LIN Control**: LIN Sleep/Wakeup, schedule table switching, and LIN diagnostic requests and responses on LIN-capable interfaces.
-*   **Trace Replay**: Replay Vector ASC, candump, PCAP and PCAPng logs with adjustable speed, RX/TX direction filtering, channel mapping to live interfaces and optional autoplay with the measurement.
-*   **Export Formats**: Save traces as Vector ASC, Vector MDF4, Linux candump, PCAP or PCAPng (Wireshark-compatible).
+*   **Trace Replay**: Replay Vector ASC and BLF, ASAM MDF4 (CAN bus logging), candump, PEAK TRC, PCAP and PCAPng logs at their own speed (0.1x–10x) or **As fast as possible** (no timing, the file's timestamps in the trace), with RX/TX direction filtering, channel mapping to live interfaces and optional autoplay with the measurement. **Play from / to** limits playback to a time range (same formats as "Go to" below). While a file loads the view counts the messages read, the elapsed time and MB/s; a loaded file that changes on disk is reloaded, with a notice in the status bar.
+*   **Convert** (toolbar button right of DBC Editor, or File > Convert...): a log to any other log format (candump, ASC, MF4, pcap, pcapng, TRC, BLF) from any readable one, and a CAN database between DBC and BUSMASTER DBF (SYM as input). Logs go through the frame cache and are encoded on up to 16 threads: a 2 GB candump (45.7M frames) converts in 1.3 to 2.7 s per format once cached, a 12 GB one needs no more RAM than its cache. A progress bar and Cancel; a cancelled conversion leaves no file. Our MF4 layout keeps no CAN FD bit-rate-switch flag; DBF keeps messages, signals, value descriptions, comments and multiplexing, not attributes or value tables.
+*   **Large Logs**: A loaded log is parsed once into a frame cache (`$XDG_CACHE_HOME/kraken-explorer/*.kfc`, rebuilt when the file's content changes, the least recently opened caches are dropped once the directory exceeds 32 GB) and mapped, so multi-GB logs open instantly afterwards. The whole file shows in the trace: jump with the Log's position slider or "Go to" time, the graph decodes only the visible time window. See [Large logs and the frame cache](#large-logs-and-the-frame-cache).
+*   **Trace file view**: With a loaded file the Log shows the whole file, however big: a row-linear position slider ("row 182 764 569 at 1:02:03.500"), a **Go to** field taking a time since the first frame (`90`, `1:30`, `1:02:03.5`, `2d 1:02:03`; Enter jumps), the mouse wheel and the vim keys (`j`/`k`, `gg`/`G`, Ctrl+d/u/f/b). The filter runs over the file's per-id index, the Index column groups thousands (`182 764 569`).
+*   **Export Formats**: Save traces as Vector ASC or BLF, Vector MDF4, Linux candump, PEAK TRC, PCAP or PCAPng (Wireshark-compatible).
 *   **SocketCAN link control**: The CAN Status view brings interfaces Up / Down (physical CAN with the bitrate from the setup), creates and deletes `vcan` interfaces, and **Auto-baud** scans a physical interface listen-only (1 Mbit/s down to 10 kbit/s), brings it up at the bitrate it finds and stores that in the setup.
 *   **Workspace**: Dear ImGui interface with docking, floating windows on multiple monitors, workspace tabs, Light/Dark theme, adjustable text size (Settings, 100–175 %) and an in-app file picker. Uses no CPU while idle.
 
 <br>![Kraken Explorer Trace View](view.png)<br>
+
+## Large logs and the frame cache
+
+Measured numbers per machine, and how to reproduce them: [performance-baseline.md](performance-baseline.md).
+
+Loading a trace file (Replay view, or `--replay FILE`) parses it once into a **frame cache**:
+`$XDG_CACHE_HOME/kraken-explorer/<hash of the path>.kfc` (`~/.cache/kraken-explorer/` without
+`XDG_CACHE_HOME`). The cache holds every frame sorted by time plus a per-id index (frame numbers per
+channel and id), and is memory-mapped on every later open, so an 8 GB log takes one slow load
+(progress, message count, elapsed time and MB/s in the Replay view) and opens instantly after that.
+The first load parses 1 MB blocks on up to 16 threads while one thread reads the file ahead in big
+sequential chunks; with enough free RAM the cache is built in memory and shown at once, and saved to
+disk in the background (on exit Kraken Explorer waits for that save). Measured on a 12th-gen i7 with
+an NVMe SSD: a 2 GB candump already in the page cache loads in about 1 s, a 12 GB one from disk in
+about 16 s (the disk reads 12 GB in 12.6 s).
+The cache is keyed by the file's path and validated against its size and a hash of its content: a
+touched but unchanged file keeps its cache, an edited or still-growing one is rebuilt. While a file
+is loaded the Replay view checks it once a second; when its content changed the file is reloaded and
+the status bar says so. A cache built by another version of Kraken Explorer is rebuilt. Delete the
+`.kfc` files to reclaim the space; they are recreated on the next load.
+
+With a file loaded (and no measurement running) the trace *is* the file, read from the mapping:
+
+* **Log** (Trace window, Monitor tab, Log view) shows the whole file. ImGui scrolls in pixels, which
+  cannot address hundreds of millions of rows, so the page starts at a row number instead: the
+  position slider is linear in rows and shows `row N at h:mm:ss.mmm`, **Go to** takes a time since
+  the first frame (`90` = 90 s, `1:30`, `1:02:03.5`, `2d 1:02:03`) and Enter jumps to the first frame
+  at or after it, the wheel moves three rows, the vim keys move the selection (`j`/`k`, `gg`/`G`,
+  Ctrl+d/u half a page, Ctrl+f/b a page) and the page follows. Autoscroll pins the page to the end.
+  The filter uses the per-id index, so filtering a huge file by id costs only that id's frames.
+* **Graph** decodes only the signals' samples inside the visible time window, through the per-id
+  index, and again after every pan or zoom; it opens on the whole file. A vertical line marks the
+  Log's top row, the window follows the Log when the Log leaves it, and a click in the plot moves the
+  Log to that time. Each signal keeps a min/max pyramid of its whole series (built once in the background), so a zoomed-out view costs the plot's pixels, not the file's frames, and no spike is lost.
+* **Value Search** reads the id's frames through the index (every channel carrying the message), so a
+  search touches only that message's frames; a raw search with an id does the same, without one it scans the file.
+* **Replay** plays the mapped frames, optionally only **Play from / to** a time range.
+
+Times in these fields and columns use one notation: seconds below a minute (`12.345`), then `m:ss`,
+`h:mm:ss` and `Nd hh:mm:ss`. The cache stores frames as 32-byte records (longer CAN FD payloads
+in an overflow area); the original file is not modified. Starting a measurement, appending live frames or clearing the trace
+leaves the file view; the file stays loaded in the Replay view.
 
 ## 🛠️ Building
 
@@ -52,7 +99,7 @@ nlohmann/json, nanosvg and doctest are downloaded at configure time (FetchConten
 
 ```bash
 sudo apt install build-essential cmake ninja-build pkg-config \
-    libusb-1.0-0-dev libnl-3-dev libnl-route-3-dev python3-dev pybind11-dev libgl-dev \
+    libusb-1.0-0-dev zlib1g-dev libnl-3-dev libnl-route-3-dev python3-dev pybind11-dev libgl-dev \
     libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
     libwayland-dev libxkbcommon-dev wayland-protocols
 ```
@@ -131,16 +178,15 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ### Optional hardware drivers
 
-**Kvaser** (`-DKRAKEN_KVASER=ON`):
+**Kvaser**: a Kvaser USB dongle works in two ways, no build option needed.
 
-  1. Download and build [linuxcan](https://www.kvaser.com/downloads-kvaser/) (V5.51.461 or newer):
-     ```bash
-     tar -xf linuxcan.tar.gz
-     make -C linuxcan/canlib
-     sudo make -C linuxcan/canlib install
-     sudo ldconfig
-     ```
-  2. Configure with `cmake -B build -DKRAKEN_KVASER=ON`.
+  * **SocketCAN** (out of the box): the kernel's `kvaser_usb` driver gives the dongle a `can0`
+    interface; bring it up like any SocketCAN interface (see above) and pick it in the setup.
+  * **CANlib** (native, also virtual channels and CAN FD data-phase bitrates): install Kvaser's
+    [linuxcan](https://www.kvaser.com/downloads-kvaser/) (V5.51 or newer) --
+    `make -C linuxcan/canlib && sudo make -C linuxcan/canlib install && sudo ldconfig` plus its
+    kernel modules -- and restart Kraken Explorer; it loads `libcanlib.so.1` at start and lists the
+    Kvaser channels next to the SocketCAN ones.
 
 
 ## REST API
@@ -154,7 +200,7 @@ use an ssh tunnel from other hosts). Every request runs on the main thread, repl
 | `POST /measurement/start`, `POST /measurement/stop` | like F5 / Shift+F5 |
 | `POST /record {"armed": true}` | arm / disarm recording (Ctrl+R) |
 | `POST /trace/clear` | clear the trace |
-| `POST /trace/save {"path": "out.asc"}` | save the trace (.asc, .candump, .log, .mf4, .pcap, .pcapng, .trc) |
+| `POST /trace/save {"path": "out.asc"}` | save the trace (.asc, .blf, .candump, .log, .mf4, .pcap, .pcapng, .trc) |
 | `POST /send {"iface": "vcan0", "id": 291, "data": "01 02 03", "extended": false, "fd": false}` | send one frame |
 | `POST /script {"code": "import kraken\nprint(kraken.trace_size())"}` | run Python in the script window (409 while one runs) |
 

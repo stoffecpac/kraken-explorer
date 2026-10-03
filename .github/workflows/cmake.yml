@@ -13,7 +13,7 @@ env:
   # and install just BUILD_DEPS.
   BUILD_DEPS: >-
     build-essential cmake ninja-build pkg-config
-    libusb-1.0-0-dev libnl-3-dev libnl-route-3-dev python3-dev pybind11-dev libgl-dev
+    libusb-1.0-0-dev zlib1g-dev libnl-3-dev libnl-route-3-dev python3-dev pybind11-dev libgl-dev
   GUI_DEPS: >-
     libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
     libwayland-dev libxkbcommon-dev wayland-protocols
@@ -104,10 +104,6 @@ jobs:
     name: Build Kraken Explorer DEB + AppImage
     runs-on: ubuntu-24.04
 
-    env:
-      # Kvaser linuxcan version — update here when a newer SDK is released.
-      KVASER_VERSION: "5.51.461"
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
@@ -119,26 +115,12 @@ jobs:
 
     - *fetch_cache
 
-    - name: Install Kvaser CANlib (Linux)
-      run: |
-        VER_US="${KVASER_VERSION//./_}"
-        wget -q "https://pim.kvaser.com/var/assets/Product_Resources/7330130980754/${KVASER_VERSION}/linuxcan_${VER_US}.tar.gz" \
-          -O /tmp/linuxcan.tar.gz
-        mkdir -p /tmp/linuxcan
-        tar -xf /tmp/linuxcan.tar.gz -C /tmp/linuxcan --strip-components=1
-        # Build only the userspace canlib — no kernel modules required
-        make -C /tmp/linuxcan/canlib
-        sudo make -C /tmp/linuxcan/canlib install
-        sudo ldconfig
-
     - name: Build DEB package
       env:
-        CMAKE_ARGS: -DKRAKEN_KVASER=ON
         DEB_MAINTAINER: Schildkroet <https://github.com/Schildkroet>
       run: |
-        # libcanlib comes from the linuxcan build above; no Debian package provides it.
-        BUNDLE_LIBS="$(find /usr/lib /usr/local/lib -maxdepth 2 -name 'libcanlib*.so*' | tr '\n' ' ')" \
-          scripts/build_deb.sh build
+        # The Kvaser driver loads libcanlib at run time: nothing to install or bundle here.
+        scripts/build_deb.sh build
         dpkg-deb --info build/*.deb
 
     - name: Read version

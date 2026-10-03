@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/bus_message.h"
+#include "core/frame_cache_rec.h"
 
 // Chunked append-only store of every received/sent frame. Main thread only.
 // Indices are global and stable: message i stays at index i until its chunk is pruned,
@@ -24,14 +25,24 @@ struct Trace
     uint64_t max_size = 500000; // trace/maxSize, shared by all interfaces: whole chunks are dropped while >= max_size remain
     bool prune_warned = false;
     uint64_t clears = 0;        // bumped by trace_clear, so views can tell a clear from pruning
+    // File view (trace_open_file): every frame of a loaded file as its frame cache's 32-byte
+    // records, mmap'ed, decoded on read in place of the chunks. Indices [begin, end) map to
+    // file[index - begin]. Appending leaves the file view.
+    std::span<const FrameCacheRec> file;
+    std::span<const FrameCachePayload> file_overflow; // payloads of the file's frames with len > 8
 };
 
 [[nodiscard]] inline uint64_t trace_size(const Trace& t) noexcept { return t.end - t.begin; }
 
-// begin <= index < end.
-[[nodiscard]] inline const BusMessage& trace_at(const Trace& t, uint64_t index) noexcept
+// begin <= index < end. By value: a file view decodes its record (a live frame is a copy, which
+// is nothing next to what callers do per frame).
+[[nodiscard]] inline BusMessage trace_at(const Trace& t, uint64_t index) noexcept
 {
     const uint64_t rel = index - t.begin;
+    if (!t.file.empty())
+    {
+        return frame_cache_decode(t.file[rel], t.file_overflow);
+    }
     return t.chunks[rel / trace_chunk_size][rel % trace_chunk_size];
 }
 
@@ -52,8 +63,13 @@ struct Trace
 
 void trace_append(Trace& t, std::span<const BusMessage> msgs);
 void trace_clear(Trace& t);
+// Clears the trace and shows `file` instead (sorted by ts_ns, with its overflow payloads, both
+// kept alive by the caller until the next trace_clear / trace_open_file / trace_append). Views
+// that consume new frames as they arrive (graph, instrument panel, ...) skip a file view: it is
+// not live traffic.
+void trace_open_file(Trace& t, std::span<const FrameCacheRec> file, std::span<const FrameCachePayload> overflow);
 
-// Called on an RX thread for every frame before it is queued, e.g. Gateway, the Python
+// Called on an RX thread for every frame before it is queued, e.g. the Python
 // RX hook, the recorder queue (the old Qt::DirectConnection consumers). Must be cheap and
 // thread-safe. The consumer list is only changed while no RX thread runs.
 struct RxConsumer

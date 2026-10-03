@@ -38,12 +38,27 @@ void status_bar_sample(StatusBarState& s, bool measuring, uint64_t frames, std::
     if (!measuring || !s.measuring || frames < s.frames)
     {
         // Idle, or the first frame of a measurement: re-base, so no earlier frames count.
-        s = {.frames = frames, .sampled = now, .rate = 0.0, .measuring = measuring};
+        s.rate = 0.0;
+        s.measuring = measuring;
     }
     else if (dt >= 1.0)
     {
-        s = {.frames = frames, .sampled = now, .rate = static_cast<double>(frames - s.frames) / dt, .measuring = true};
+        s.rate = static_cast<double>(frames - s.frames) / dt;
+        s.measuring = true;
     }
+    else
+    {
+        return;
+    }
+    s.frames = frames; // fields one by one: a whole-struct assignment would drop the notice
+    s.sampled = now;
+}
+
+void status_bar_notice(StatusBarState& s, std::string text, double seconds)
+{
+    s.notice = std::move(text);
+    s.notice_until = std::chrono::steady_clock::now()
+                     + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
 }
 
 void draw_status_bar(App& app, StatusBarState& s)
@@ -65,6 +80,11 @@ void draw_status_bar(App& app, StatusBarState& s)
         const char* text = app.recorder.recording ? "Recording" : app.measuring ? "Measuring" : "Ready";
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(text);
+        if (!s.notice.empty() && std::chrono::steady_clock::now() < s.notice_until)
+        {
+            ImGui::SameLine(0.0f, 24.0f * px);
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(theme_text(ThemeText::warn)), "%s", s.notice.c_str());
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();

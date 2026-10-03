@@ -13,6 +13,6 @@ foreach(src IN LISTS test_sources)
 endforeach()
 
 # Areas with more than the binary: compile definitions, data files, extra programs.
-foreach(area format_compat setup sym_parser tx_generator)
+foreach(area format_compat replay setup sym_parser tx_generator)
     add_subdirectory(${area})
 endforeach()

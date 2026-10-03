@@ -105,7 +105,7 @@ void draw_help_overlay(const MainMenu& menu)
     {
         ImGui::CloseCurrentPopup();
     }
-    ImGui::TextUnformatted("Keyboard shortcuts");
+    ImGui::TextUnformatted("Keyboard Shortcuts");
     if (ImGui::BeginTable("##help_columns", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoHostExtendX))
     {
         ImGui::TableNextColumn();

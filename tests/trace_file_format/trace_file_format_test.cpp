@@ -81,7 +81,7 @@ TEST_CASE("pcapng is not mistaken for pcap")
 TEST_CASE("format from path rejects unknown extensions")
 {
     for (const char* path : { "/tmp/run", "/tmp/run.", "/tmp/run.txt", "/tmp/run.csv",
-                              "/tmp/run.blf" /* not implemented */, "", "." })
+                              "", "." })
     {
         CAPTURE(path);
         CHECK_FALSE(trace_format_from_path(path).has_value());
@@ -126,7 +126,7 @@ TEST_CASE("format from name")
 
 TEST_CASE("format from name rejects unknown names")
 {
-    for (const char* name : { "", "  ", "blf", "csv", "vector", "asc2", "pcap ng" })
+    for (const char* name : { "", "  ", "csv", "vector", "asc2", "pcap ng" })
     {
         CAPTURE(name);
         CHECK_FALSE(trace_format_from_name(name).has_value());

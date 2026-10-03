@@ -65,3 +65,12 @@ TEST_CASE("consecutive matches beat gapped ones")
     CHECK(fuzzy_score("rpm", "EngRpm") == 76);
     CHECK(fuzzy_score("rpm", "RearPump") == 52);
 }
+
+TEST_CASE("smart_find: ripgrep smart case")
+{
+    CHECK(smart_find("Tentacle1.Angle", "angle") == 10); // lower-case pattern: any case
+    CHECK(smart_find("Tentacle1.angle", "Angle") == std::string_view::npos); // upper-case: exact
+    CHECK(smart_find("Tentacle1.Angle", "Angle") == 10);
+    CHECK(smart_find("abc", "") == 0);
+    CHECK(smart_find("abc", "x") == std::string_view::npos);
+}

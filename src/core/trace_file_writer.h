@@ -23,13 +23,16 @@
 // messages to a std::ostream (open it in binary mode). Free of App so whole files
 // can be unit-tested and checked against reference readers.
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
 #include <span>
+#include <stop_token>
 #include <string>
 
 #include "core/bus_message.h"
+#include "core/frame_cache_rec.h"
 #include "core/trace_file_format.h"
 
 // Interface label for candump lines and pcapng interface descriptions.
@@ -37,4 +40,12 @@ using IfaceNameFn = std::function<std::string(uint16_t iface)>;
 
 void write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const BusMessage> messages,
                       const IfaceNameFn& iface_name);
+
+// The same from a frame cache's records (core/frame_cache_rec.h), decoded one at a time and written
+// in pieces: a 12 GB log converts without its frames as BusMessages in RAM. done (optional) gets the
+// frames written so far now and then; a stop request ends the write early and returns false (the
+// output is then incomplete).
+bool write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const FrameCacheRec> recs,
+                      std::span<const FrameCachePayload> overflow, const IfaceNameFn& iface_name,
+                      std::atomic<uint64_t>* done = nullptr, const std::stop_token& stop = {});
 

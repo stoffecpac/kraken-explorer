@@ -37,25 +37,12 @@ void build_default_layout(WorkspaceTab& tab, ImVec2 size)
     dock("Generator View", mid);
     dock("Message View", mid);
     dock("Python Script", mid);
+    dock("Value Search", mid);
     dock("Graph", graph);
     ImGui::DockBuilderFinish(tab.dockspace);
     tab.focus_front = 2;
     tab.column_node = column;
     tab.graph_node = graph;
-}
-
-// "Kraken Explorer v<version>" in bold (12px in the Qt status bar), faked by drawing it twice 1px apart.
-void draw_version_text()
-{
-    const std::string text = "Kraken Explorer v" VERSION_STRING;
-    const float px = ImGui::GetFontSize() / 15.0f;
-    const float w = ImGui::CalcTextSize(text.c_str()).x + 1.0f;
-    const ImVec2 pos(ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - w - 15.0f * px,
-                     ImGui::GetWindowPos().y + (ImGui::GetWindowHeight() - ImGui::GetFontSize()) * 0.5f);
-    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddText(pos, col, text.c_str());
-    dl->AddText(ImVec2(pos.x + 1.0f, pos.y), col, text.c_str());
 }
 
 } // namespace
@@ -274,7 +261,6 @@ WorkspaceTab* draw_workspace(App& app)
                                  ImGuiDockNodeFlags_KeepAliveOnly);
             }
         }
-        draw_version_text();
     }
     ImGui::End();
     ImGui::PopStyleVar();

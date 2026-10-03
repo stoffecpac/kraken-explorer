@@ -1,12 +1,15 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <set>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -17,6 +20,7 @@
 // No <imgui.h> here: app.h includes this header and is included by targets without imgui.
 
 struct App;
+struct Trace;
 struct CanDbSignal;
 struct Iface;
 struct WorkspaceTab;
@@ -49,8 +53,8 @@ enum class TraceTab
     Count,
 };
 
-// The Filter dialog plus the text filter (case-insensitive substring of ID, name, channel,
-// sender and type).
+// The Filter dialog plus the text filter (substring of ID and type case-insensitive, of name,
+// channel and sender with ripgrep smart case).
 struct TraceFilter
 {
     std::string text;
@@ -159,11 +163,32 @@ struct TraceWindowState
     std::vector<VimYankItem> yank_items; // the captured row for vim_yank_menu: [0] whole row, then one per column
     bool focus_filter = false; // '/' pressed: focus the Filter field next frame
     int tab_goto = -1;         // h/l: TraceTab to switch to, -1 = none
+
+    // File view (a loaded file, Trace::file): the Log draws the visible page straight from the
+    // mapping, no row list. ImGui scrolls in float pixels, which cannot address 100M+ rows, so
+    // the page starts at file_top (a row number) instead.
+    uint64_t file_top = 0;
+    std::string file_goto; // "Go to" field: time since the first frame, "90", "1:30", "2d 1:02:03"
+    std::vector<uint32_t> file_filtered; // with a filter: the accepted frames (file indices), in time order
+    // The merge that fills file_filtered runs on a worker (file_view_filter): file_filter_result is
+    // valid while it runs (the Log shows "Filtering..."), trace_window_update takes the list when ready.
+    std::atomic<uint64_t> file_filter_done{0}; // frames merged so far, of file_filter_total
+    uint64_t file_filter_total = 0;
+    std::future<std::vector<uint32_t>> file_filter_result;
+    std::jthread file_filter_worker; // last: stopped and joined before the members it uses go away
 };
 
 // Pulls new frames from app.trace into the window's lists: incremental filter, aggregation
 // and protocol decoding. Applies a pending filter change or trace clear first. No ImGui.
 void trace_window_update(TraceWindowState& s, const App& app);
+
+// Shows trace index `index` in the Monitor tab as it is: the Log row (file view: with
+// `context_rows` above it) or, in the aggregated Monitor, the row of that frame's id.
+void trace_window_select_frame(TraceWindowState& s, const Trace& t, uint64_t index, uint64_t context_rows);
+
+// File view: puts the Log on frame `file_index` (an index into Trace::file): the row is the frame
+// itself, or the first filtered row at or after it; `context_rows` rows stay visible above it.
+void trace_window_goto(TraceWindowState& s, const Trace& t, uint64_t file_index, uint64_t context_rows);
 
 // Filter predicate used for all lists (exposed for tests).
 [[nodiscard]] bool trace_filter_accepts(const TraceWindowState& s, const App& app, const BusMessage& m);

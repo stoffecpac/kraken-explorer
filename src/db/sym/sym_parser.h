@@ -14,5 +14,5 @@
 [[nodiscard]] bool sym_parse(std::string_view text, CanDb& db);
 // Sets db.path on success.
 [[nodiscard]] bool sym_parse_file(const std::filesystem::path& path, CanDb& db);
-// By extension: .sym -> sym_parse_file, anything else -> dbc_parse_file.
+// By extension: .sym -> sym_parse_file, .dbf -> dbf_parse_file (BUSMASTER), anything else -> dbc_parse_file.
 [[nodiscard]] bool can_db_parse_file(const std::filesystem::path& path, CanDb& db);

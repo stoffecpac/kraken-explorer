@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <string>
 #include <cstdint>
 
 struct App;
@@ -13,7 +14,12 @@ struct StatusBarState
     std::chrono::steady_clock::time_point sampled{};
     double rate = 0.0;   // frames/s over the last second
     bool measuring = false; // as of the last sample
+    std::string notice;     // shown after Ready / Measuring until notice_until
+    std::chrono::steady_clock::time_point notice_until{};
 };
+
+// A message in the status bar for `seconds` (e.g. "big.log changed on disk, reloading").
+void status_bar_notice(StatusBarState& s, std::string text, double seconds = 10.0);
 
 // frames = Trace::end (counts on through clears and pruning). Re-bases while not measuring and
 // on the first call of a measurement, so the first rate covers only that measurement's frames;

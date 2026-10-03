@@ -291,7 +291,6 @@ void workspace_xml(const App& app, pugi::xml_document& doc)
         }
         graph_save_xml(tab.graphs, app.ifaces, el);
     }
-    gateway_save_xml(app.gateway, app.ifaces, root);
     pugi::xml_node setup = root.append_child("setup");
     setup_save_xml(app.setup, setup);
 }
@@ -390,7 +389,6 @@ bool workspace_load(App& app, const std::string& path)
             instrument_panel_load_xml(panel, app.ifaces, ip);
         }
     }
-    gateway_load_xml(app.gateway, app.ifaces, root); // ifaces enumerated by now
     ws.next_uid = std::max(ws.next_uid, next_uid);
     ws.current = 0;
     // The dock nodes are cleared and rebuilt from here; tabs without a node get the default layout.

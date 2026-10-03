@@ -502,7 +502,7 @@ void conditional_logging_frame(App& app, ConditionalLogging& cl)
     }
     const Trace& t = app.trace;
     cl.processed = std::clamp(cl.processed, t.begin, t.end);
-    if (!cl.config.enabled)
+    if (!cl.config.enabled || !t.file.empty()) // a file view is not live traffic
     {
         cl.processed = t.end;
         return;

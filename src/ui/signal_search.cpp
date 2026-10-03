@@ -57,6 +57,35 @@ const std::string& unit_of(const SignalEntry& e)
 
 } // namespace
 
+namespace
+{
+
+// Frecency: the labels picked most recently (any search box) rank first among equal
+// matches. ponytail: last 16 picks, in memory only; persist in the ini if it should survive a restart.
+std::vector<std::string> g_recent;
+
+int recency_bonus(const std::string& label)
+{
+    const auto it = std::ranges::find(g_recent, label);
+    return it == g_recent.end() ? 0 : static_cast<int>(g_recent.size() - static_cast<std::size_t>(it - g_recent.begin()));
+}
+
+const SignalEntry* picked(const SignalEntry* e)
+{
+    if (e != nullptr)
+    {
+        std::erase(g_recent, e->label);
+        g_recent.push_back(e->label);
+        if (g_recent.size() > 16)
+        {
+            g_recent.erase(g_recent.begin());
+        }
+    }
+    return e;
+}
+
+} // namespace
+
 void signal_search_update(SignalSearch& s, const Setup& setup, const std::string& query)
 {
     const bool rebuilt = s.generation != setup.generation;
@@ -76,7 +105,7 @@ void signal_search_update(SignalSearch& s, const Setup& setup, const std::string
         const int score = fuzzy_score(query, s.entries[i].label);
         if (score >= 0)
         {
-            s.hits.push_back({.score = score, .entry = static_cast<int>(i)});
+            s.hits.push_back({.score = score + recency_bonus(s.entries[i].label), .entry = static_cast<int>(i)});
         }
     }
     // Best score first, then the shorter label (fzf's tie-break); equal ones keep setup order.
@@ -117,7 +146,7 @@ const SignalEntry* signal_search_input(SignalSearch& s, const Setup& setup, cons
     }
     if (enter && !query.empty() && s.selected < n)
     {
-        return &s.entries[static_cast<std::size_t>(s.hits[static_cast<std::size_t>(s.selected)].entry)];
+        return picked(&s.entries[static_cast<std::size_t>(s.hits[static_cast<std::size_t>(s.selected)].entry)]);
     }
     return nullptr;
 }
@@ -140,11 +169,11 @@ const SignalEntry* signal_search_list(SignalSearch& s)
         ImGui::TextDisabled("No matching signal");
         return nullptr;
     }
-    const SignalEntry* picked = nullptr;
+    const SignalEntry* chosen = nullptr;
     if (s.selected >= 0 && s.selected < n && ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput
         && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
     {
-        picked = &s.entries[static_cast<std::size_t>(s.hits[static_cast<std::size_t>(s.selected)].entry)];
+        chosen = &s.entries[static_cast<std::size_t>(s.hits[static_cast<std::size_t>(s.selected)].entry)];
     }
     const ImU32 text_col = ImGui::GetColorU32(ImGuiCol_Text);
     const ImU32 match_col = ImGui::GetColorU32(ImGuiCol_CheckMark); // theme accent
@@ -167,7 +196,7 @@ const SignalEntry* signal_search_list(SignalSearch& s)
                 s.selected = row;
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                 {
-                    picked = &e;
+                    chosen = &e;
                 }
             }
             ImGui::PopID();
@@ -205,5 +234,5 @@ const SignalEntry* signal_search_list(SignalSearch& s)
             }
         }
     }
-    return picked;
+    return picked(chosen);
 }

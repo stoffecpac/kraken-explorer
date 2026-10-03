@@ -7,6 +7,10 @@
 
 void trace_append(Trace& t, std::span<const BusMessage> msgs)
 {
+    if (!t.file.empty() && !msgs.empty())
+    {
+        trace_clear(t); // live frames end the file view
+    }
     while (!msgs.empty())
     {
         const std::size_t used = (t.end - t.begin) % trace_chunk_size;
@@ -38,9 +42,19 @@ void trace_append(Trace& t, std::span<const BusMessage> msgs)
 void trace_clear(Trace& t)
 {
     t.chunks.clear();
+    t.file = {};
+    t.file_overflow = {};
     t.begin = t.end; // indices keep counting, so stale indices never alias new messages
     t.prune_warned = false;
     ++t.clears;
+}
+
+void trace_open_file(Trace& t, std::span<const FrameCacheRec> file, std::span<const FrameCachePayload> overflow)
+{
+    trace_clear(t);
+    t.file = file;
+    t.file_overflow = overflow;
+    t.end = t.begin + file.size();
 }
 
 void rx_deliver(Inbox& inbox, std::span<const RxConsumer> consumers, std::span<const BusMessage> msgs,

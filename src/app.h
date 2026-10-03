@@ -3,6 +3,7 @@
 #include <chrono>
 #include <deque>
 #include <map>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -18,11 +19,12 @@
 #include "ui/dbc_editor.h"
 #include "ui/lin_control.h"
 #include "ui/log_window.h"
-#include "ui/gateway.h"
 #include "ui/instrument_panel.h"
 #include "ui/main_menu.h"
+#include "ui/convert.h"
 #include "ui/recording_dialog.h"
 #include "ui/file_dialog.h"
+#include "ui/frame_cache.h"
 #include "ui/replay.h"
 #include "ui/script_window.h"
 #include "ui/settings.h"
@@ -31,11 +33,14 @@
 #include "ui/status_bar.h"
 #include "ui/theme.h"
 #include "ui/tx_generator.h"
+#include "ui/value_search.h"
 #include "ui/vim_nav.h"
 #include "ui/trace_window.h"
 #include "ui/workspace_tabs.h"
 
 // All application state. Grows as the port proceeds (trace, setup, interfaces, ...).
+struct ImDrawList;
+
 struct App
 {
     bool quit = false;
@@ -46,13 +51,16 @@ struct App
     ThemeFonts fonts; // fonts.mono for hex/data columns
     Tasks tasks;      // work posted from other threads; tasks.wake doubles as the RX wake-up
     Trace trace;
+    std::shared_ptr<const FrameCache> trace_file; // keeps the mapping of trace.file (a loaded file) alive
     std::unordered_map<unsigned, TraceWindowState> trace_windows; // per workspace tab uid
+    std::unordered_map<unsigned, ValueSearch> value_searches;     // per workspace tab uid
     Recorder recorder; // follows menu.record_armed; not movable, so App stays put
     std::chrono::steady_clock::time_point recorder_drained{};
     LogWindowState log_window;       // shared by every tab's Log window
     CanStatusState can_status;       // counters polled while measuring
     VimNav vim_windows;              // Ctrl+w window moves (ui/vim_nav)
     RecordingDialogState recording_dialog;
+    ConvertState convert;
     SettingsDialogState settings_dialog;
     StatusBarState status_bar;       // bottom status line + menu bar connection corner
     Setup setup;
@@ -61,17 +69,21 @@ struct App
     std::vector<RxConsumer> rx_consumers;  // run on the RX threads, changed only while they are stopped
     std::vector<BusMessage> rx_scratch;
     std::map<unsigned, TxGenerator> tx_generators; // key: WorkspaceTab::uid; after ifaces (its thread sends on them)
-    Gateway gateway;                         // an RX consumer; forwards between ifaces
     std::map<unsigned, Replay> replays;      // key: WorkspaceTab::uid; after ifaces (its thread sends on them)
     FileDialog trace_file_dialog;            // Trace > Save Trace to file / Export full trace / Import full trace
     // Graph > Export to PNG: main.cpp reads this rectangle (ImGui screen coordinates, main
     // viewport only) from the framebuffer after the frame is rendered and writes the file.
-    struct Screenshot
+    // Graph "Export to PNG": a window drawn off screen this frame (ui/graph); main.cpp takes its
+    // draw lists out of the main viewport and renders them into a framebuffer of w x h.
+    struct PngExport
     {
+        std::vector<ImDrawList*> lists; // the window's and its children's (the plot is a child window)
+        float x = 0.0f, y = 0.0f;       // the window's position (the draw lists' origin)
+        int w = 0, h = 0;
+        bool transparent = false;
         std::string path;
-        float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
     };
-    std::optional<Screenshot> screenshot;
+    std::optional<PngExport> png_export;
     std::map<unsigned, LinControl> lin_controls; // key: WorkspaceTab::uid
     std::map<unsigned, InstrumentPanel> instrument_panels; // key: WorkspaceTab::uid; after ifaces (sends on them)
     std::map<unsigned, DbcEditorState> dbc_editors;        // key: WorkspaceTab::uid; edits a copy of a DBC

@@ -49,7 +49,7 @@ ImVec4 level_color(LogFilterLevel level)
 
 bool line_passes(const LogWindowState& s, LogFilterLevel level, const LogEntry& e)
 {
-    return s.show[static_cast<size_t>(level)] && (s.query.empty() || fuzzy_score(s.query, e.text) >= 0);
+    return s.show[static_cast<size_t>(level)] && smart_find(e.text, s.query) != std::string_view::npos;
 }
 
 // text with the bytes at pos (ascending) in hi. ponytail: splits at byte positions, so a
@@ -211,7 +211,7 @@ void draw_log_window(LogWindowState& s, const WorkspaceTab& tab)
         s.focus_search = false;
     }
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##search", "Fuzzy search (/)", &s.query);
+    ImGui::InputTextWithHint("##search", "Search (/)", &s.query);
 
     constexpr ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_RowBg
                                       | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable;
@@ -244,7 +244,12 @@ void draw_log_window(LogWindowState& s, const WorkspaceTab& tab)
                 ImGui::TableNextColumn();
                 if (!s.query.empty())
                 {
-                    (void)fuzzy_score(s.query, e.text, &s.positions);
+                    s.positions.clear();
+                    const std::size_t at = smart_find(e.text, s.query);
+                    for (std::size_t k = 0; at != std::string_view::npos && k < s.query.size(); ++k)
+                    {
+                        s.positions.push_back(static_cast<int>(at + k));
+                    }
                 }
                 text_highlighted(e.text, s.query.empty() ? std::span<const int>{} : s.positions, highlight);
             }

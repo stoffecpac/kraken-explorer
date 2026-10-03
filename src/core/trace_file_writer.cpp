@@ -23,8 +23,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <future>
+#include <string>
+#include <thread>
 #include <ostream>
 #include <string_view>
+#include <ranges>
 #include <unordered_map>
 #include <vector>
 
@@ -78,82 +82,186 @@ constexpr uint32_t mdf_record_size = 8 + 4 + 1 + 1 + 64;  // t, CAN_ID, DLC, Dir
                std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// Linux candump -L lines.
-void write_candump(std::ostream& out, std::span<const BusMessage> messages, const IfaceNameFn& iface_name)
+constexpr std::size_t line_chunk = std::size_t{1} << 16; // frames per chunk; a chunk starts at a multiple
+
+// Every frame's bytes, encoded on up to 16 threads in chunks of line_chunk frames and handed to
+// sink in file order: one thread formatted ~3.7M text lines/s (a 2 GB candump took 12 s), the
+// binary records are as independent. encode(buf, m, i) appends frame i's bytes and may only read
+// shared state. Exceptions from a chunk (a stopped write) reach the caller.
+template <class Buffer, class Frames, class Encode, class Sink>
+void encode_parallel(const Frames& messages, const Encode& encode, const Sink& sink)
 {
-    std::string line;
+    constexpr std::size_t chunk = line_chunk;
+    const std::size_t n = std::ranges::size(messages);
+    const std::size_t chunks = (n + chunk - 1) / chunk;
+    const std::size_t threads = std::clamp<std::size_t>(std::thread::hardware_concurrency(), 1, 16);
+    std::vector<Buffer> bufs(threads);
+    std::vector<std::future<void>> inflight(threads);
+    const auto launch = [&](std::size_t k)
+    {
+        inflight[k % threads] = std::async(std::launch::async, [&, k]
+        {
+            Buffer& b = bufs[k % threads];
+            b.clear();
+            for (std::size_t i = k * chunk; i < std::min(n, (k + 1) * chunk); ++i)
+            {
+                encode(b, messages[i], i);
+            }
+        });
+    };
+    for (std::size_t k = 0; k < std::min(threads, chunks); ++k)
+    {
+        launch(k);
+    }
+    for (std::size_t k = 0; k < chunks; ++k)
+    {
+        inflight[k % threads].get();
+        sink(bufs[k % threads]);
+        if (k + threads < chunks)
+        {
+            launch(k + threads);
+        }
+    }
+}
+
+template <class Frames, class Line>
+void write_lines(std::ostream& out, const Frames& messages, const Line& line)
+{
+    encode_parallel<std::string>(messages, line, [&](const std::string& t) { out.write(t.data(), static_cast<std::streamsize>(t.size())); });
+}
+
+template <class Frames, class Encode>
+void write_records(std::ostream& out, const Frames& messages, const Encode& encode)
+{
+    encode_parallel<std::vector<uint8_t>>(messages, encode, [&](const std::vector<uint8_t>& b) { write_bytes(out, b); });
+}
+
+// Linux candump -L lines.
+template <class Frames>
+void write_candump(std::ostream& out, const Frames& messages, const IfaceNameFn& iface_name)
+{
+    std::vector<std::string> names; // iface_name per interface, looked up once (it returns a new string)
     for (const BusMessage& m : messages)
     {
-        line.clear();
-        append_candump_line(line, m, iface_name(m.iface));
-        line += '\n';
-        out << line;
+        if (m.iface >= names.size())
+        {
+            names.resize(m.iface + 1u);
+        }
+        if (names[m.iface].empty())
+        {
+            names[m.iface] = iface_name(m.iface);
+        }
     }
+    write_lines(out, messages, [&](std::string& t, const BusMessage& m, std::size_t)
+    {
+        append_candump_line(t, m, names[m.iface]);
+        t += '\n';
+    });
 }
 
 // Vector ASC; times relative to the earliest message (the trace may be unsorted), channels numbered 1.. in order
 // of first appearance. An empty trace still gets header and footer.
-void write_vector_asc(std::ostream& out, std::span<const BusMessage> messages)
+template <class Frames>
+void write_vector_asc(std::ostream& out, const Frames& messages)
 {
     using namespace std::chrono;
-    const int64_t start_ns = messages.empty() ? now_ns() : std::ranges::min(messages, {}, &BusMessage::ts_ns).ts_ns;
+    // One pass for the earliest time and the channel numbers (1.. in order of first appearance).
+    int64_t start_ns = messages.empty() ? now_ns() : INT64_MAX;
+    std::vector<int> channel; // per iface, 0 = not seen
+    int channels = 0;
+    for (const BusMessage& m : messages)
+    {
+        start_ns = std::min(start_ns, m.ts_ns);
+        if (m.iface >= channel.size())
+        {
+            channel.resize(m.iface + 1u, 0);
+        }
+        if (channel[m.iface] == 0)
+        {
+            channel[m.iface] = ++channels;
+        }
+    }
 
     std::string line;
     append_asc_header(line, system_clock::time_point(duration_cast<system_clock::duration>(nanoseconds(start_ns))));
     out << line;
-
-    std::unordered_map<uint16_t, int> channels;
-    for (const BusMessage& m : messages)
+    write_lines(out, messages, [&](std::string& t, const BusMessage& m, std::size_t)
     {
-        const auto [it, inserted] = channels.try_emplace(m.iface, static_cast<int>(channels.size()) + 1);
-        line.clear();
-        append_asc_line(line, m, start_ns, it->second);
-        line += '\n';
-        out << line;
-    }
-
+        append_asc_line(t, m, start_ns, channel[m.iface]);
+        t += '\n';
+    });
     out << asc_footer << '\n';
 }
 
 // PEAK PCAN trace 2.1; like ASC, times relative to the earliest message and buses numbered 1.. in order of first
 // appearance. LIN frames have no TRC representation and are left out.
-void write_trc(std::ostream& out, std::span<const BusMessage> messages)
+template <class Frames>
+void write_trc(std::ostream& out, const Frames& messages)
 {
-    const int64_t start_ns = messages.empty() ? now_ns() : std::ranges::min(messages, {}, &BusMessage::ts_ns).ts_ns;
-
-    std::string line;
-    append_trc_header(line, start_ns);
-    out << line;
-
-    std::unordered_map<uint16_t, int> buses;
-    uint64_t number = 0;
+    // One pass for the earliest time, the bus numbers (1.. in order of first appearance) and the
+    // message numbers (CAN frames only) at each 64k-frame mark, so the lines format in parallel.
+    constexpr std::size_t mark = line_chunk;
+    int64_t start_ns = messages.empty() ? now_ns() : INT64_MAX;
+    std::vector<int> bus;
+    int buses = 0;
+    std::vector<uint64_t> number_at; // CAN frames before frame k * mark
+    uint64_t can_frames = 0;
+    std::size_t i = 0;
     for (const BusMessage& m : messages)
     {
+        if (i++ % mark == 0)
+        {
+            number_at.push_back(can_frames);
+        }
+        start_ns = std::min(start_ns, m.ts_ns);
         if (m.type != BusType::CAN)
         {
             continue;
         }
-        const auto [it, inserted] = buses.try_emplace(m.iface, static_cast<int>(buses.size()) + 1);
-        line.clear();
-        append_trc_line(line, m, ++number, start_ns, it->second);
-        line += "\r\n";
-        out << line;
+        ++can_frames;
+        if (m.iface >= bus.size())
+        {
+            bus.resize(m.iface + 1u, 0);
+        }
+        if (bus[m.iface] == 0)
+        {
+            bus[m.iface] = ++buses;
+        }
     }
+
+    std::string line;
+    append_trc_header(line, start_ns);
+    out << line;
+    write_lines(out, messages, [&](std::string& t, const BusMessage& m, std::size_t index)
+    {
+        static thread_local uint64_t number = 0; // this thread's chunk: CAN frames so far
+        if (index % line_chunk == 0)
+        {
+            number = number_at[index / mark];
+        }
+        if (m.type != BusType::CAN)
+        {
+            return;
+        }
+        append_trc_line(t, m, ++number, start_ns, bus[m.iface]);
+        t += "\r\n";
+    });
 }
 
 // ASAM MDF 4.10 with one channel group of fixed-size records:
 //   t (REAL, seconds since the first message, master)
 //   | CAN_ID (canid_t, see core/socket_can.h: flags, error classes for error frames)
 //   | DLC (payload length) | Dir (0 = Rx, 1 = Tx) | DataBytes (64-byte array)
-void write_vector_mdf(std::ostream& out, std::span<const BusMessage> messages)
+template <class Frames>
+void write_vector_mdf(std::ostream& out, const Frames& messages)
 {
     // The master channel t must be non-decreasing; frames of several interfaces may not be.
-    std::vector<BusMessage> sorted;
     if (!std::ranges::is_sorted(messages, {}, &BusMessage::ts_ns))
     {
-        sorted.assign(messages.begin(), messages.end());
+        std::vector<BusMessage> sorted(messages.begin(), messages.end());
         std::ranges::stable_sort(sorted, {}, &BusMessage::ts_ns);
-        messages = sorted;
+        write_vector_mdf(out, std::span<const BusMessage>(sorted));
+        return;
     }
 
     // Block sizes follow the ASAM MDF 4.1 block definitions: 24-byte common
@@ -206,7 +314,6 @@ void write_vector_mdf(std::ostream& out, std::span<const BusMessage> messages)
     const uint64_t o_dt = off;
 
     std::vector<uint8_t> b;
-    b.reserve(static_cast<size_t>(o_dt + 24 + record_count * mdf_record_size));
 
     auto zeros = [&b](size_t count) { b.insert(b.end(), count, 0); };
     auto block_header = [&b](std::string_view id, uint64_t length, uint64_t link_count)
@@ -326,24 +433,191 @@ void write_vector_mdf(std::ostream& out, std::span<const BusMessage> messages)
 
     // ===== DTBLOCK =====
     block_header("##DT", 24 + record_count * mdf_record_size, 0);
-    for (const BusMessage& m : messages)
+    write_bytes(out, b);
+    write_records(out, messages, [&](std::vector<uint8_t>& r, const BusMessage& m, std::size_t)
     {
         const uint8_t len = std::min<uint8_t>(m.len, 64);
         // canid_t as in <linux/can.h>: standard and extended frames with the same
         // number stay distinct, error frames keep their error class.
         // Microsecond resolution, as the trace timestamps always had.
-        append_le(b, static_cast<double>(m.ts_ns / 1000 - t_start_ns / 1000) / 1e6);
-        append_le(b, socket_can::frame_id(m));
-        append_le(b, len);
-        append_le(b, uint8_t{has_flag(m, bus_flag::tx) ? uint8_t{1} : uint8_t{0}});
-        b.insert(b.end(), m.data.begin(), m.data.begin() + len);
-        zeros(64 - len);
+        append_le(r, static_cast<double>(m.ts_ns / 1000 - t_start_ns / 1000) / 1e6);
+        append_le(r, socket_can::frame_id(m));
+        append_le(r, len);
+        append_le(r, uint8_t{has_flag(m, bus_flag::tx) ? uint8_t{1} : uint8_t{0}});
+        r.insert(r.end(), m.data.begin(), m.data.begin() + len);
+        r.resize(r.size() + 64 - len);
+    });
+}
+
+// Windows SYSTEMTIME of a UTC ns timestamp: year, month, day of week, day, hour, minute, second, ms.
+void append_systemtime(std::vector<uint8_t>& b, int64_t ns)
+{
+    using namespace std::chrono;
+    const sys_time<nanoseconds> t{nanoseconds{ns}};
+    const auto day = floor<days>(t);
+    const year_month_day ymd{day};
+    const hh_mm_ss hms{floor<milliseconds>(t - day)};
+    for (const unsigned v : {static_cast<unsigned>(static_cast<int>(ymd.year())), static_cast<unsigned>(ymd.month()),
+                             weekday{day}.c_encoding(), static_cast<unsigned>(ymd.day()),
+                             static_cast<unsigned>(hms.hours().count()), static_cast<unsigned>(hms.minutes().count()),
+                             static_cast<unsigned>(hms.seconds().count()), static_cast<unsigned>(hms.subseconds().count())})
+    {
+        append_le(b, static_cast<uint16_t>(v));
     }
+}
+
+// Vector BLF: CAN_MESSAGE, CAN_FD_MESSAGE_64 and CAN_ERROR_EXT objects, LIN_MESSAGE /
+// LIN_CRC_ERROR / LIN_SLEEP for LIN frames (header v1, ns timestamps since the file start: the
+// first frame's whole millisecond, as SYSTEMTIME holds no less) in stored (uncompressed)
+// LOG_CONTAINERs of 128 KiB. Channel = iface + 1.
+// ponytail: no zlib containers (files ~5x bigger than Vector's); a LIN frame nobody answered
+// goes out as a LIN_MESSAGE (Vector has LIN_RCV_ERROR for it).
+// One BLF object (CAN, CAN FD, error, LIN, LIN sleep/wakeup) of m, padded as the readers expect.
+// Returns its size, so a first pass can size the file without building it.
+std::size_t append_blf_object(std::vector<uint8_t>* inner_ptr, const BusMessage& m, int64_t start)
+{
+    const bool fd = has_flag(m, bus_flag::fd);
+    const bool lin = m.type == BusType::LIN;
+    const uint32_t type = lin ? (has_flag(m, bus_flag::lin_sleep | bus_flag::lin_wakeup) ? 20
+                                 : (m.errors & bus_error::lin_checksum_error) != 0 ? 12 : 11)
+                              : is_error_frame(m) ? 73 : fd ? 101 : 1;
+    const uint32_t body = type == 73 ? 32 : type == 101 ? 40u + m.len : type == 20 ? 8 : lin ? 24 : 16;
+    const uint32_t id = can_id(m) | (has_flag(m, bus_flag::extended) ? 0x80000000u : 0);
+    if (inner_ptr == nullptr)
+    {
+        return 32 + body + body % 4;
+    }
+    std::vector<uint8_t>& inner = *inner_ptr;
+    append_raw(inner, "LOBJ");
+    append_le(inner, uint16_t{32});        // header size
+    append_le(inner, uint16_t{1});         // header version
+    append_le(inner, uint32_t{32 + body}); // object size
+    append_le(inner, type);
+    append_le(inner, uint32_t{2});         // flags: TIME_ONE_NANS
+    append_le(inner, uint16_t{0});         // client index
+    append_le(inner, uint16_t{0});         // object version
+    append_le(inner, static_cast<uint64_t>(std::max<int64_t>(0, m.ts_ns - start)));
+    const auto channel = static_cast<uint16_t>(m.iface + 1);
+    if (type == 73)
+    {
+        append_le(inner, channel);
+        append_le(inner, uint16_t{0});     // length
+        inner.resize(inner.size() + 28);   // flags, ecc, position, dlc, frame length, id, ext flags, data
+    }
+    else if (type == 101)
+    {
+        inner.push_back(static_cast<uint8_t>(channel));
+        inner.push_back(m.dlc);
+        inner.push_back(m.len);            // valid data bytes
+        inner.push_back(0);                // tx count
+        append_le(inner, id);
+        append_le(inner, uint32_t{0});     // frame length
+        append_le(inner, uint32_t{0x1000u | (has_flag(m, bus_flag::brs) ? 0x2000u : 0u)}); // EDL, BRS
+        inner.resize(inner.size() + 18);   // bit timings, offsets, bit count
+        inner.push_back(has_flag(m, bus_flag::tx) ? 1 : 0);
+        inner.push_back(0);                // ext data offset
+        append_le(inner, uint32_t{0});     // crc
+        inner.insert(inner.end(), m.data.begin(), m.data.begin() + m.len);
+    }
+    else if (type == 20)
+    {
+        append_le(inner, channel);
+        inner.push_back(0);                // reason
+        inner.push_back(has_flag(m, bus_flag::lin_wakeup) ? 0x02 : 0); // flags bit 1: awake after this event
+        append_le(inner, uint32_t{0});
+    }
+    else if (lin)
+    {
+        append_le(inner, channel);
+        inner.push_back(static_cast<uint8_t>(m.id));
+        inner.push_back(m.len);
+        inner.insert(inner.end(), m.data.begin(), m.data.begin() + 8);
+        inner.resize(inner.size() + 4);    // fsm id, fsm state, header time, full time
+        append_le(inner, uint16_t{0});     // crc
+        inner.push_back(has_flag(m, bus_flag::tx) ? 1 : 0);
+        inner.resize(inner.size() + 5);    // reserved
+    }
+    else
+    {
+        append_le(inner, channel);
+        inner.push_back(static_cast<uint8_t>((has_flag(m, bus_flag::tx) ? 0x01 : 0) | (has_flag(m, bus_flag::rtr) ? 0x80 : 0)));
+        inner.push_back(m.dlc);
+        append_le(inner, id);
+        inner.insert(inner.end(), m.data.begin(), m.data.begin() + 8);
+    }
+    inner.resize(inner.size() + body % 4); // padding, as the readers expect
+    return 32 + body + body % 4;
+}
+
+template <class Frames>
+void write_blf(std::ostream& out, const Frames& messages)
+{
+    const int64_t first = messages.empty() ? now_ns() : messages.front().ts_ns;
+    const int64_t start = first - (first % 1'000'000 + 1'000'000) % 1'000'000;
+    // First pass: the objects' total size and count, for the file header; then the containers are
+    // written as they fill (objects may straddle two containers, as in Vector's files).
+    uint64_t total = 0;
+    uint32_t count = 0;
+    for (const BusMessage& m : messages)
+    {
+        total += append_blf_object(nullptr, m, start);
+        ++count;
+    }
+
+    constexpr std::size_t chunk = 128 * 1024;
+    std::vector<uint8_t> b;
+    append_raw(b, "LOGG");
+    append_le(b, uint32_t{144});               // header size
+    b.insert(b.end(), {0, 0, 0, 0, 2, 6, 8, 1}); // application id + version, BLF 2.6.8.1
+    const uint64_t containers = (total + chunk - 1) / chunk;
+    const uint64_t tail = total - (containers == 0 ? 0 : (containers - 1) * chunk);
+    append_le(b, static_cast<uint64_t>(144 + containers * 32 + total + tail % 4)); // file size
+    append_le(b, static_cast<uint64_t>(144 + containers * 32 + total));            // uncompressed size
+    append_le(b, count);
+    append_le(b, uint32_t{0});                 // objects read
+    append_systemtime(b, start);
+    append_systemtime(b, messages.empty() ? start : messages.back().ts_ns);
+    b.resize(144);
     write_bytes(out, b);
+
+    std::vector<uint8_t> inner;
+    const auto container = [&](const uint8_t* bytes, std::size_t n)
+    {
+        b.clear();
+        append_raw(b, "LOBJ");
+        append_le(b, uint16_t{16});            // base header only
+        append_le(b, uint16_t{1});
+        append_le(b, static_cast<uint32_t>(32 + n));
+        append_le(b, uint32_t{10});            // LOG_CONTAINER
+        append_le(b, uint16_t{0});             // stored
+        b.resize(b.size() + 6);
+        append_le(b, static_cast<uint32_t>(n)); // uncompressed size
+        b.resize(b.size() + 4);
+        b.insert(b.end(), bytes, bytes + n);
+        b.resize(b.size() + n % 4);
+        write_bytes(out, b);
+    };
+    encode_parallel<std::vector<uint8_t>>(
+        messages, [&](std::vector<uint8_t>& objects, const BusMessage& m, std::size_t) { append_blf_object(&objects, m, start); },
+        [&](const std::vector<uint8_t>& objects)
+        {
+            inner.insert(inner.end(), objects.begin(), objects.end());
+            std::size_t used = 0;
+            for (; inner.size() - used >= chunk; used += chunk)
+            {
+                container(inner.data() + used, chunk);
+            }
+            inner.erase(inner.begin(), inner.begin() + static_cast<std::ptrdiff_t>(used));
+        });
+    if (!inner.empty())
+    {
+        container(inner.data(), inner.size());
+    }
 }
 
 // libpcap, microsecond timestamps, LINKTYPE_CAN_SOCKETCAN.
-void write_pcap(std::ostream& out, std::span<const BusMessage> messages)
+template <class Frames>
+void write_pcap(std::ostream& out, const Frames& messages)
 {
     std::vector<uint8_t> b;
     append_le(b, uint32_t{0xA1B2C3D4});  // magic: microsecond timestamps
@@ -354,24 +628,26 @@ void write_pcap(std::ostream& out, std::span<const BusMessage> messages)
     append_le(b, uint32_t{72});          // snaplen: CANFD_MTU
     append_le(b, uint32_t{227});         // LINKTYPE_CAN_SOCKETCAN
 
-    std::vector<uint8_t> frame;
-    for (const BusMessage& m : messages)
-    {
-        frame.clear();
-        append_socketcan_frame(frame, m);
-        const int64_t ts_us = m.ts_ns / 1000;
-        append_le(b, static_cast<uint32_t>(ts_us / 1000000));
-        append_le(b, static_cast<uint32_t>(ts_us % 1000000));
-        append_le(b, static_cast<uint32_t>(frame.size()));  // incl_len
-        append_le(b, static_cast<uint32_t>(frame.size()));  // orig_len
-        b.insert(b.end(), frame.begin(), frame.end());
-    }
     write_bytes(out, b);
+    write_records(out, messages, [](std::vector<uint8_t>& r, const BusMessage& m, std::size_t)
+    {
+        const std::size_t at = r.size();
+        r.resize(at + 16); // record header, filled in once the frame's size is known
+        append_socketcan_frame(r, m);
+        const auto size = static_cast<uint32_t>(r.size() - at - 16);
+        const int64_t ts_us = m.ts_ns / 1000;
+        const uint32_t head[4] = {static_cast<uint32_t>(ts_us / 1000000), static_cast<uint32_t>(ts_us % 1000000), size, size}; // incl_len, orig_len
+        for (int k = 0; k < 16; ++k)
+        {
+            r[at + k] = static_cast<uint8_t>(head[k / 4] >> (8 * (k % 4)));
+        }
+    });
 }
 
 // pcapng: one section, one interface description per interface in order of
 // first appearance, then one enhanced packet per message.
-void write_pcapng(std::ostream& out, std::span<const BusMessage> messages, const IfaceNameFn& iface_name)
+template <class Frames>
+void write_pcapng(std::ostream& out, const Frames& messages, const IfaceNameFn& iface_name)
 {
     std::unordered_map<uint16_t, uint32_t> index;
     std::vector<uint16_t> order;
@@ -389,17 +665,12 @@ void write_pcapng(std::ostream& out, std::span<const BusMessage> messages, const
     {
         pcapng_append_interface(b, iface_name(iface));
     }
-    for (const BusMessage& m : messages)
-    {
-        pcapng_append_packet(b, m, index[m.iface]);
-    }
     write_bytes(out, b);
+    write_records(out, messages, [&](std::vector<uint8_t>& r, const BusMessage& m, std::size_t) { pcapng_append_packet(r, m, index.at(m.iface)); });
 }
 
-}
-
-void write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const BusMessage> messages,
-                      const IfaceNameFn& iface_name)
+template <class Frames>
+void write_frames(std::ostream& out, TraceFileFormat format, const Frames& messages, const IfaceNameFn& iface_name)
 {
     switch (format)
     {
@@ -409,5 +680,82 @@ void write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const
         case TraceFileFormat::Pcap:      write_pcap(out, messages); return;
         case TraceFileFormat::PcapNg:    write_pcapng(out, messages, iface_name); return;
         case TraceFileFormat::Trc:       write_trc(out, messages); return;
+        case TraceFileFormat::Blf:       write_blf(out, messages); return;
     }
+}
+
+struct WriteStopped
+{
+};
+
+} // namespace
+
+void write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const BusMessage> messages,
+                      const IfaceNameFn& iface_name)
+{
+    write_frames(out, format, messages, iface_name);
+}
+
+bool write_trace_file(std::ostream& out, TraceFileFormat format, std::span<const FrameCacheRec> recs,
+                      std::span<const FrameCachePayload> overflow, const IfaceNameFn& iface_name,
+                      std::atomic<uint64_t>* done, const std::stop_token& stop)
+{
+    // Every writer but candump and pcap reads the frames twice (start time, sizes or interfaces
+    // first): progress counts reads, reported as frames.
+    const uint64_t passes = format == TraceFileFormat::CanDump || format == TraceFileFormat::Pcap ? 1 : 2;
+    // Text formats decode on several threads (write_lines): each thread counts its own reads and adds
+    // them in batches. The binary writers read on this thread only and keep a plain counter, which
+    // measured faster (thread_local per frame cost them ~50 %).
+    std::atomic<uint64_t> reads{0};
+    const auto batch = [&]
+    {
+        if (stop.stop_requested())
+        {
+            throw WriteStopped{}; // out of the writer's loop without a stop check in each one
+        }
+        const uint64_t total = reads.fetch_add(0x10000, std::memory_order_relaxed) + 0x10000;
+        if (done != nullptr)
+        {
+            done->store(std::min<uint64_t>(total / passes, recs.size()), std::memory_order_relaxed);
+        }
+    };
+    const bool text = format == TraceFileFormat::CanDump || format == TraceFileFormat::VectorAsc || format == TraceFileFormat::Trc;
+    try
+    {
+        if (text)
+        {
+            write_frames(out, format, recs | std::views::transform([&](const FrameCacheRec& r)
+            {
+                static thread_local uint32_t mine = 0;
+                if (++mine == 0x10000)
+                {
+                    mine = 0;
+                    batch();
+                }
+                return frame_cache_decode(r, overflow);
+            }), iface_name);
+        }
+        else
+        {
+            uint32_t mine = 0;
+            write_frames(out, format, recs | std::views::transform([&](const FrameCacheRec& r)
+            {
+                if (++mine == 0x10000)
+                {
+                    mine = 0;
+                    batch();
+                }
+                return frame_cache_decode(r, overflow);
+            }), iface_name);
+        }
+    }
+    catch (const WriteStopped&)
+    {
+        return false;
+    }
+    if (done != nullptr)
+    {
+        done->store(recs.size(), std::memory_order_relaxed);
+    }
+    return true;
 }

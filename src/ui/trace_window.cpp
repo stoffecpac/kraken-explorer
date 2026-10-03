@@ -1,9 +1,13 @@
 #include "ui/trace_window.h"
 
 #include <algorithm>
+#include <cfloat>
+#include <climits>
 #include <charconv>
 #include <format>
 #include <iterator>
+#include <optional>
+#include <queue>
 #include <string_view>
 #include <utility>
 
@@ -14,6 +18,7 @@
 
 #include "app.h"
 #include "core/setup.h"
+#include "core/fuzzy.h"
 #include "core/text.h"
 #include "db/model/can_db.h"
 #include "db/model/lin_db.h"
@@ -65,7 +70,7 @@ struct ColumnDef
 };
 
 constexpr ColumnDef columns[col_agg_count] = {
-    {"Index", "000000", 0, false},
+    {"Index", "000 000 000", 0, false},
     {"Time", "00:00:00.000", 0, false},
     {"Channel", "vcan0", 0, true},
     {"RX/TX", "TX", 0, true},
@@ -155,6 +160,12 @@ std::string_view iface_name(const App& app, uint16_t i)
 bool icontains(std::string_view hay, std::string_view needle)
 {
     return needle.empty() || !std::ranges::search(hay, needle, {}, ascii_lower, ascii_lower).empty();
+}
+
+// Names, senders and channels: ripgrep smart case. Ids stay case-insensitive (hex is not text).
+bool smart_contains(std::string_view hay, std::string_view needle)
+{
+    return smart_find(hay, needle) != std::string_view::npos;
 }
 
 void append_type(std::string& out, const BusMessage& m)
@@ -253,12 +264,11 @@ void append_time(std::string& out, TimestampMode mode, int64_t ts, int64_t prev_
     case TimestampMode::AbsoluteUtc:
         std::format_to(std::back_inserter(out), "{:%H:%M:%S}", sys);
         return;
-    case TimestampMode::Relative:
-        std::format_to(std::back_inserter(out), "{:.3f}", ts >= first_ts ? static_cast<double>(ts - first_ts) / 1e9 : 0.0);
+    case TimestampMode::Relative: // seconds, or m:ss / h:mm:ss / Nd hh:mm:ss once that long
+        append_duration(out, ts >= first_ts ? static_cast<double>(ts - first_ts) / 1e9 : 0.0);
         return;
     case TimestampMode::Delta:
-        std::format_to(std::back_inserter(out), "{:.3f}",
-                       prev_ts > 0 && ts >= prev_ts ? static_cast<double>(ts - prev_ts) / 1e9 : 0.0);
+        append_duration(out, prev_ts > 0 && ts >= prev_ts ? static_cast<double>(ts - prev_ts) / 1e9 : 0.0);
         return;
     }
 }
@@ -287,8 +297,8 @@ bool text_matches(const App& app, std::string_view text, const BusMessage& m, bo
     buf += '\n';
     append_type(buf, m);
     const DbText db = db_text(app, m);
-    return icontains(buf, text) || icontains(db.name, text) || icontains(db.sender, text)
-           || icontains(iface_name(app, m.iface), text);
+    return icontains(buf, text) || smart_contains(db.name, text) || smart_contains(db.sender, text)
+           || smart_contains(iface_name(app, m.iface), text);
 }
 
 bool proto_accepts(const TraceWindowState& s, const App& app, const ProtocolMessage& pm)
@@ -299,7 +309,7 @@ bool proto_accepts(const TraceWindowState& s, const App& app, const ProtocolMess
     }
     const BusMessage& f = pm.raw_frames.front();
     return dialog_accepts(s.filter, f)
-           && (s.filter.text.empty() || icontains(pm.name, s.filter.text) || text_matches(app, s.filter.text, f, s.decimal));
+           && (s.filter.text.empty() || smart_contains(pm.name, s.filter.text) || text_matches(app, s.filter.text, f, s.decimal));
 }
 
 // --- model update -------------------------------------------------------------------------
@@ -418,7 +428,171 @@ void reset_views(TraceWindowState& s, uint64_t begin)
     s.j1939 = {};
 }
 
+// Any filter set (text, TX/RX, hidden ids or interfaces)?
+bool trace_filter_active(const TraceFilter& f) noexcept
+{
+    return !f.text.empty() || !f.show_tx || !f.show_rx || !f.hidden_ids.empty() || !f.hidden_lin_ids.empty()
+           || !f.hidden_ifaces.empty();
+}
+
+// File view: one aggregated row per (channel, id) of the cache index, with its last two frames and
+// the cycle stats the build summed up (the median window from the tail of the row's frame list).
+// Indexing the whole file through process_frame would take seconds.
+void file_view_agg(TraceWindowState& s, const App& app)
+{
+    const Trace& t = app.trace;
+    s.first_ts_ns = trace_at(t, t.begin).ts_ns;
+    if (app.trace_file == nullptr)
+    {
+        return;
+    }
+    const FrameCache& c = *app.trace_file;
+    for (const FrameCacheRow& r : c.rows)
+    {
+        AggRow row{.last = frame_cache_frame(c, c.row_frames[r.first + r.count - 1]), .order = static_cast<uint32_t>(s.agg.size() + 1)};
+        if (r.count > 1)
+        {
+            row.prev = frame_cache_frame(c, c.row_frames[r.first + r.count - 2]);
+            row.has_prev = true;
+            row.cycle = {.min_ns = r.cycle_min_ns, .max_ns = r.cycle_max_ns, .sum_ns = r.cycle_sum_ns, .count = r.count - 1};
+            const uint64_t n = std::min<uint64_t>(row.cycle.count, CycleStats::window);
+            for (uint64_t j = 0, k = r.first + r.count - n; j < n; ++j, ++k)
+            {
+                row.cycle.recent[j] = c.recs[c.row_frames[k]].ts_ns - c.recs[c.row_frames[k - 1]].ts_ns;
+            }
+        }
+        s.agg_index.try_emplace(agg_key(row.last), static_cast<uint32_t>(s.agg.size()));
+        s.agg.push_back(row);
+    }
+    s.agg_dirty = true;
+}
+
+// Drops the filtered list of a file view and a merge still running for it (stopped and joined).
+void file_filter_cancel(TraceWindowState& s)
+{
+    s.file_filtered.clear();
+    s.file_filter_result = {};
+    s.file_filter_worker = {};
+}
+
+// File view with a filter: the accepted frames in time order, from the cache's per-id index. The
+// filter looks at id, name, sender, channel and type, all fixed per (channel, id) row, so each row
+// is decided once (here) and the accepted rows' frame lists are merged on a worker (~1 s per 100M
+// frames); only the direction is per frame. 4 bytes per accepted frame and no pass over the file.
+void file_view_filter(TraceWindowState& s, const App& app)
+{
+    file_filter_cancel(s);
+    if (app.trace_file == nullptr)
+    {
+        return;
+    }
+    const FrameCache& c = *app.trace_file;
+    std::vector<std::span<const uint32_t>> lists;
+    std::size_t total = 0;
+    for (const FrameCacheRow& r : c.rows)
+    {
+        BusMessage m = frame_cache_frame(c, c.row_frames[r.first]);
+        m.flags = static_cast<uint16_t>((m.flags & ~bus_flag::tx) | (s.filter.show_rx ? 0 : bus_flag::tx));
+        if (trace_filter_accepts(s, app, m))
+        {
+            lists.push_back(c.row_frames.subspan(r.first, r.count));
+            total += r.count;
+        }
+    }
+    s.file_filter_total = total;
+    s.file_filter_done = 0;
+    // The spans point into the mapping, kept alive by the captured cache. A newer filter stops
+    // this merge (checked every 1M frames) and its partial list is dropped.
+    std::packaged_task<std::vector<uint32_t>(std::stop_token)> merge(
+        [cache = app.trace_file, lists = std::move(lists), total, show_tx = s.filter.show_tx, show_rx = s.filter.show_rx,
+         done = &s.file_filter_done, wake = app.tasks.wake](const std::stop_token& stop) -> std::vector<uint32_t>
+        {
+            std::vector<uint32_t> out;
+            out.reserve(total);
+            const bool by_direction = !show_tx || !show_rx;
+            using Head = std::pair<uint32_t, std::size_t>; // (frame, list)
+            std::priority_queue<Head, std::vector<Head>, std::greater<>> heap;
+            std::vector<std::size_t> next(lists.size(), 1);
+            for (std::size_t i = 0; i < lists.size(); ++i)
+            {
+                heap.emplace(lists[i][0], i);
+            }
+            for (uint64_t n = 0; !heap.empty(); ++n)
+            {
+                if (n % (uint64_t{1} << 20) == 0 && n > 0)
+                {
+                    if (stop.stop_requested())
+                    {
+                        return {};
+                    }
+                    done->store(n);
+                    if (wake != nullptr)
+                    {
+                        wake(); // the toolbar's "Filtering... N %" in an event-driven loop
+                    }
+                }
+                const auto [frame, i] = heap.top();
+                heap.pop();
+                if (!by_direction || ((cache->recs[frame].flags & bus_flag::tx) != 0 ? show_tx : show_rx))
+                {
+                    out.push_back(frame);
+                }
+                if (next[i] < lists[i].size())
+                {
+                    heap.emplace(lists[i][next[i]++], i);
+                }
+            }
+            done->store(total);
+            if (wake != nullptr)
+            {
+                wake(); // the next frame's trace_window_update takes the list
+            }
+            return out;
+        });
+    s.file_filter_result = merge.get_future();
+    s.file_filter_worker = std::jthread(std::move(merge));
+}
+
 } // namespace
+
+void trace_window_select_frame(TraceWindowState& s, const Trace& t, uint64_t index, uint64_t context_rows)
+{
+    s.tab_goto = static_cast<int>(TraceTab::Monitor);
+    s.autoscroll = false;
+    if (s.modes[static_cast<int>(TraceTab::Monitor)] == TraceViewMode::Aggregated)
+    {
+        // The aggregated row of this frame's id, where it is in the sorted display order.
+        const auto it = s.agg_index.find(agg_key(trace_at(t, index)));
+        if (it != s.agg_index.end())
+        {
+            const auto pos = std::ranges::find(s.agg_order, it->second);
+            s.selected = pos != s.agg_order.end() ? static_cast<int>(pos - s.agg_order.begin()) : static_cast<int>(it->second);
+            s.nav_scroll = true;
+        }
+        return;
+    }
+    if (!t.file.empty())
+    {
+        trace_window_goto(s, t, index - t.begin, context_rows);
+        return;
+    }
+    const auto it = std::ranges::lower_bound(s.rolling, index, {}, &TraceRow::index);
+    s.selected = static_cast<int>(it - s.rolling.begin());
+    s.nav_scroll = true;
+}
+
+void trace_window_goto(TraceWindowState& s, const Trace& t, uint64_t file_index, uint64_t context_rows)
+{
+    const bool filtered = !s.file_filtered.empty();
+    const uint64_t n = filtered ? s.file_filtered.size() : t.file.size();
+    uint64_t row = filtered ? static_cast<uint64_t>(std::ranges::lower_bound(s.file_filtered, static_cast<uint32_t>(file_index))
+                                                     - s.file_filtered.begin())
+                            : file_index;
+    row = std::min(row, n > 0 ? n - 1 : 0);
+    s.selected = static_cast<int>(std::min<uint64_t>(row, INT32_MAX));
+    s.file_top = row > context_rows ? row - context_rows : 0;
+    s.autoscroll = false;
+}
 
 void cycle_stats_add(CycleStats& c, int64_t cycle_ns) noexcept
 {
@@ -500,6 +674,7 @@ void trace_window_update(TraceWindowState& s, const App& app)
     {
         s.clears = t.clears;
         reset_views(s, t.begin);
+        s.file_top = 0;
     }
     if (s.was_measuring && !app.measuring)
     {
@@ -518,12 +693,33 @@ void trace_window_update(TraceWindowState& s, const App& app)
     const auto pruned = std::ranges::lower_bound(s.rolling, t.begin, {}, &TraceRow::index);
     s.rolling.erase(s.rolling.begin(), pruned);
 
+    const bool file_view = !t.file.empty();
+    if (s.file_filter_result.valid()
+        && (!file_view || s.file_filter_result.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
+    {
+        // The merge is done (or the file view ended, live frames came in: not wanted any more).
+        s.file_filtered = file_view ? s.file_filter_result.get() : std::vector<uint32_t>{};
+        s.file_filter_result = {};
+        s.file_filter_worker = {};
+    }
+    if (file_view && s.processed < t.end)
+    {
+        file_view_agg(s, app);
+        s.processed = t.end;
+        s.filter_dirty = true; // the filtered Log of a file view is built by the refilter below
+    }
     if (s.filter_dirty)
     {
         s.filter_dirty = false;
         s.rolling.clear();
         s.last_by_key.clear();
-        s.refilter = t.begin;
+        // A file view draws its rows straight from the trace, or from file_filtered (draw_file_rolling).
+        s.refilter = file_view ? UINT64_MAX : t.begin;
+        file_filter_cancel(s);
+        if (file_view && trace_filter_active(s.filter))
+        {
+            file_view_filter(s, app);
+        }
         s.agg_dirty = true;
         proto_rebuild_visible(s, app, s.uds);
         proto_rebuild_visible(s, app, s.j1939);
@@ -790,7 +986,7 @@ void cycle_cells(Ctx& c, const CycleStats& st)
 void index_cell(Ctx& c, uint64_t n)
 {
     c.buf.clear();
-    std::format_to(std::back_inserter(c.buf), "{}", n);
+    append_grouped(c.buf, n); // "182 764 569"
     cell(col_index, c.buf);
 }
 
@@ -823,7 +1019,8 @@ void setup_columns(bool sortable, int count)
     ImGui::TableHeadersRow();
 }
 
-bool begin_table(const char* id, float px, bool sortable, bool decimal, int count = col_count)
+// width: 0 = the whole content region, negative = all but that much (ImGui item width rules).
+bool begin_table(const char* id, float px, bool sortable, bool decimal, int count = col_count, float width = 0.0f)
 {
     ImGuiTableFlags flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable
                             | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg
@@ -853,7 +1050,7 @@ bool begin_table(const char* id, float px, bool sortable, bool decimal, int coun
         min_width += w + style.CellPadding.x * 2.0f + 1.0f; // + padding and the vertical border
     }
     const float inner_width = min_width > ImGui::GetContentRegionAvail().x ? min_width : 0.0f;
-    if (!ImGui::BeginTable(id, count, flags, ImVec2(0.0f, 0.0f), inner_width))
+    if (!ImGui::BeginTable(id, count, flags, ImVec2(width, 0.0f), inner_width))
     {
         return false;
     }
@@ -1042,7 +1239,7 @@ bool tree_index_cell(Ctx& c, uint64_t n, bool has_children, const void* id)
     }
     ImGui::TableSetColumnIndex(col_index);
     c.buf.clear();
-    std::format_to(std::back_inserter(c.buf), "{}", n);
+    append_grouped(c.buf, n);
     yank_cell(c.buf);
     return ImGui::TreeNodeEx(id, ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_NoTreePushOnOpen, "%s",
                              c.buf.c_str());
@@ -1178,20 +1375,160 @@ void draw_monitor_rolling(Ctx& c, float px)
         for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r)
         {
             const TraceRow& row = s.rolling[static_cast<std::size_t>(r)];
-            const BusMessage& m = trace_at(t, row.index);
-            const BusMessage* prev = row.prev != UINT64_MAX && row.prev >= t.begin ? &trace_at(t, row.prev) : nullptr;
+            const BusMessage m = trace_at(t, row.index);
+            const bool has_prev = row.prev != UINT64_MAX && row.prev >= t.begin;
+            const BusMessage prev = has_prev ? trace_at(t, row.prev) : BusMessage{};
             ImGui::TableNextRow();
             push_row_color(c, m, 1.0f);
             yank_row(c, r);
             index_cell(c, row.index - s.index_base + 1);
             nav_row(c, r);
-            frame_cells(c, m, prev != nullptr ? prev->ts_ns : 0, prev, 1.0f);
+            frame_cells(c, m, has_prev ? prev.ts_ns : 0, has_prev ? &prev : nullptr, 1.0f);
             ImGui::PopStyleColor();
         }
     }
     autoscroll(c);
     ImGui::EndTable();
     yank_finish(c);
+}
+
+// Previous frame with m's delta key (Delta time, changed bytes): the cache's per-id index gives the
+// row's frames in time order, so it is two binary searches, exact for any id rate.
+std::optional<BusMessage> file_prev(const App& app, uint64_t index, const BusMessage& m)
+{
+    const FrameCache* c = app.trace_file.get();
+    if (c == nullptr)
+    {
+        return std::nullopt;
+    }
+    const uint32_t id = is_error_frame(m) ? replay_error_id : m.id;
+    const auto row = std::ranges::lower_bound(c->rows, std::pair{m.iface, id}, {},
+                                              [](const FrameCacheRow& r) { return std::pair{r.channel, r.id}; });
+    if (row == c->rows.end() || row->channel != m.iface || row->id != id)
+    {
+        return std::nullopt;
+    }
+    const auto list = c->row_frames.subspan(row->first, row->count);
+    const uint64_t key = delta_key(m);
+    for (auto it = std::ranges::lower_bound(list, static_cast<uint32_t>(index - app.trace.begin)); it != list.begin();)
+    {
+        if (const BusMessage p = frame_cache_frame(*c, *--it); delta_key(p) == key) // the row mixes RX and TX
+        {
+            return p;
+        }
+    }
+    return std::nullopt;
+}
+
+// Vertical scroll indicator right of the file view's Log table, linear in rows: ImGui's scrollbar
+// widget with 64-bit positions (its window scrolling is float pixels, too coarse for 100M rows).
+void file_scrollbar(TraceWindowState& s, uint64_t n, uint64_t page, float width)
+{
+    ImGui::SameLine(0.0f, 0.0f);
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImRect bb(p0, ImVec2(p0.x + width, p0.y + ImGui::GetItemRectSize().y));
+    ImS64 top = static_cast<ImS64>(s.file_top);
+    if (ImGui::ScrollbarEx(bb, ImGui::GetID("##file_scroll"), ImGuiAxis_Y, &top, static_cast<ImS64>(page), static_cast<ImS64>(n),
+                           ImDrawFlags_RoundCornersAll))
+    {
+        s.file_top = static_cast<uint64_t>(top);
+        s.autoscroll = false;
+    }
+    ImGui::Dummy(bb.GetSize());
+}
+
+// Unfiltered Log of a file view: the page of rows at file_top, read from the mapping. Wheel,
+// vim keys, the position slider and "Go to" move file_top; Autoscroll pins it to the end.
+void draw_file_rolling(Ctx& c, float px)
+{
+    TraceWindowState& s = c.s;
+    const Trace& t = c.app.trace;
+    if (s.file_filter_result.valid())
+    {
+        return; // the merge runs: the toolbar shows "Filtering... N %", the list lands in trace_window_update
+    }
+    const std::vector<uint32_t>* list = trace_filter_active(s.filter) ? &s.file_filtered : nullptr;
+    const uint64_t n = list != nullptr ? list->size() : trace_size(t);
+    const auto frame_of = [&](uint64_t r) { return list != nullptr ? (*list)[r] : r; }; // row -> file index
+    if (n == 0)
+    {
+        ImGui::TextDisabled("No frames match the filter");
+        return;
+    }
+    const int64_t first_ts = trace_at(t, t.begin).ts_ns;
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Go to");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f * px);
+    if (ImGui::InputTextWithHint("##goto", "d h:m:s", &s.file_goto, ImGuiInputTextFlags_EnterReturnsTrue))
+    {
+        const std::optional<double> at = parse_duration(s.file_goto);
+        if (!at)
+        {
+            ImGui::SetKeyboardFocusHere(-1); // keep editing a malformed time
+            return;
+        }
+        s.file_goto = format_duration(*at);
+        const auto ts = first_ts + static_cast<int64_t>(*at * 1e9);
+        trace_window_goto(s, t, static_cast<uint64_t>(std::ranges::lower_bound(t.file, ts, {}, &FrameCacheRec::ts_ns) - t.file.begin()), 0);
+    }
+    ImGui::SetItemTooltip("Time since the first frame (90, 1:30, 1:02:03.5, 2d 1:02:03), Enter jumps there");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const uint64_t zero = 0;
+    const uint64_t last = n - 1;
+    const double top_s = static_cast<double>(trace_at(t, t.begin + frame_of(std::min(s.file_top, last))).ts_ns - first_ts) / 1e9;
+    std::string position = "row ";
+    append_grouped(position, s.file_top + 1);
+    position += "  at  " + format_duration(top_s); // shown as is: no printf specifier in it
+    if (ImGui::SliderScalar("##position", ImGuiDataType_U64, &s.file_top, &zero, &last, position.c_str()))
+    {
+        s.autoscroll = false;
+    }
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float row_h = ImGui::GetTextLineHeight() + style.CellPadding.y * 2.0f;
+    const uint64_t page = static_cast<uint64_t>(std::max(1.0f, ImGui::GetContentRegionAvail().y / row_h - 2.0f)); // - header
+    const float bar_w = style.ScrollbarSize;
+    if (!begin_table("##file_rolling", px, false, s.decimal, col_count, -bar_w))
+    {
+        return;
+    }
+    // ponytail: vim selection is an int, so rows past 2^31 are reached with the slider only.
+    const int count = static_cast<int>(std::min<uint64_t>(n, INT32_MAX));
+    table_nav(c, count, true);
+    if (s.nav_scroll && s.selected >= 0) // keep the moved selection on the page
+    {
+        const auto sel = static_cast<uint64_t>(s.selected);
+        s.file_top = sel < s.file_top ? sel : sel >= s.file_top + page ? sel - page + 1 : s.file_top;
+    }
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+    {
+        const auto step = static_cast<int64_t>(-ImGui::GetIO().MouseWheel * 3.0f);
+        s.file_top = static_cast<uint64_t>(std::max<int64_t>(0, static_cast<int64_t>(s.file_top) + step));
+        s.autoscroll = false;
+    }
+    if (s.autoscroll)
+    {
+        s.file_top = n > page ? n - page : 0;
+    }
+    s.file_top = std::min(s.file_top, n > page ? n - page : 0);
+    for (uint64_t r = s.file_top; r < std::min(n, s.file_top + page); ++r)
+    {
+        const uint64_t index = t.begin + frame_of(r);
+        const BusMessage m = trace_at(t, index);
+        const std::optional<BusMessage> prev = file_prev(c.app, index, m);
+        ImGui::TableNextRow();
+        push_row_color(c, m, 1.0f);
+        yank_row(c, static_cast<int>(r));
+        index_cell(c, index - t.begin + 1);
+        nav_row(c, static_cast<int>(r));
+        frame_cells(c, m, prev ? prev->ts_ns : 0, prev ? &*prev : nullptr, 1.0f);
+        ImGui::PopStyleColor();
+    }
+    ImGui::EndTable();
+    yank_finish(c);
+    file_scrollbar(s, n, page, bar_w);
 }
 
 const char* metadata_abbrev(std::string_view name)
@@ -1534,10 +1871,18 @@ void draw_toolbar(Ctx& c, float px)
     {
         ImGui::OpenPopup("##trace_filter");
     }
+    int pct = -1; // a running refilter (live log) or file view merge (worker)
     if (s.refilter != UINT64_MAX && s.processed > c.app.trace.begin)
     {
         const uint64_t begin = c.app.trace.begin;
-        const auto pct = static_cast<int>((std::max(s.refilter, begin) - begin) * 100 / (s.processed - begin));
+        pct = static_cast<int>((std::max(s.refilter, begin) - begin) * 100 / (s.processed - begin));
+    }
+    else if (s.file_filter_result.valid())
+    {
+        pct = s.file_filter_total == 0 ? 100 : static_cast<int>(s.file_filter_done.load() * 100 / s.file_filter_total);
+    }
+    if (pct >= 0)
+    {
         same_line_or_wrap(ImGui::CalcTextSize("Filtering... 100 %").x);
         ImGui::TextDisabled("Filtering... %d %%", pct);
     }
@@ -1623,7 +1968,16 @@ void draw_trace_window(App& app, TraceWindowState& s, const WorkspaceTab& tab)
             ImGui::PushID(i);
             switch (s.tab)
             {
-            case TraceTab::Monitor: rolling ? draw_monitor_rolling(c, px) : draw_monitor_aggregated(c, px); break;
+            case TraceTab::Monitor:
+                if (rolling && !app.trace.file.empty())
+                {
+                    draw_file_rolling(c, px);
+                }
+                else
+                {
+                    rolling ? draw_monitor_rolling(c, px) : draw_monitor_aggregated(c, px);
+                }
+                break;
             case TraceTab::Uds: rolling ? draw_proto_rolling(c, s.uds, px) : draw_proto_aggregated(c, s.uds, px); break;
             default: rolling ? draw_proto_rolling(c, s.j1939, px) : draw_proto_aggregated(c, s.j1939, px); break;
             }

@@ -13,6 +13,7 @@ Kraken Explorer wrote:
                                     container; SocketCAN frames are decoded per
                                     <linux/can.h>
   MDF4                  asammdf
+  Vector BLF            python-can  (BLFReader)
 
 Any warning a reader logs counts as a failure: python-can, for instance, reads
 a malformed ASC CAN FD line but only logs "DLC vs Data Length mismatch".
@@ -183,6 +184,17 @@ def validate_asc(path, frames, channel_of):
     return len(messages)
 
 
+def validate_blf(path, frames):
+    messages = list(can.BLFReader(path))
+    check_reader_warnings(path)
+    check(f"{path} frame count", len(messages), len(frames))
+    for i, (msg, frame) in enumerate(zip(messages, frames)):
+        # BLF channels are iface + 1 in the file, python-can makes them 0-based again.
+        check_python_can(f"{path}[{i}]", msg, frame, channel=frame.iface, rx=frame.rx,
+                         ts_us=round(msg.timestamp * 1_000_000))
+    return len(messages)
+
+
 def validate_trc(path, frames, channel_of):
     with open(path, "rb") as f:
         raw = f.read()
@@ -340,6 +352,7 @@ def main():
         ("export.pcapng", validate_pcapng),
         ("export.mf4", validate_mdf),
         ("export.trc", lambda p, f: validate_trc(p, f, sample_channels)),
+        ("export.blf", validate_blf),
     ]:
         before = len(failures)
         count = validate(os.path.join(out, name), SAMPLE_FRAMES)

@@ -318,13 +318,19 @@ void draw_available(App& app, TxGenerator& gen)
     const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
     ImGui::SeparatorText("Available Messages (DBC)");
 
-    // DBC messages of the networks that use the selected interface.
+    // DBC messages of the networks that use the selected interface; when none does (no interface
+    // yet, or a DBC in a network without interfaces) every network's, so there is something to
+    // add and edit in Message View.
+    const auto uses_iface = [&](const SetupNetwork& net)
+    {
+        return std::ranges::any_of(net.interfaces, [&](const SetupInterface& si)
+                                   { return ifaces_find(app.ifaces, si.driver, si.name) == gen.iface; });
+    };
+    const bool any_network = std::ranges::any_of(app.setup.networks, uses_iface);
     std::vector<const CanDbMessage*> messages;
     for (const SetupNetwork& net : app.setup.networks)
     {
-        const bool uses_iface = std::ranges::any_of(net.interfaces, [&](const SetupInterface& si)
-                                                    { return ifaces_find(app.ifaces, si.driver, si.name) == gen.iface; });
-        if (!uses_iface)
+        if (any_network && !uses_iface(net))
         {
             continue;
         }

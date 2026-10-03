@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -147,4 +148,16 @@ constexpr int bonus_for(CharClass prev, CharClass cur) noexcept
         prev = cls;
     }
     return score;
+}
+
+// ripgrep's --smart-case substring search: case-insensitive unless the pattern has an upper-case
+// letter. Index of the first match, npos when none; an empty pattern matches at 0.
+[[nodiscard]] inline std::size_t smart_find(std::string_view text, std::string_view pattern) noexcept
+{
+    if (std::ranges::any_of(pattern, [](char c) { return c >= 'A' && c <= 'Z'; }))
+    {
+        return text.find(pattern);
+    }
+    const auto hit = std::ranges::search(text, pattern, {}, ascii_lower, ascii_lower);
+    return hit.empty() && !pattern.empty() ? std::string_view::npos : static_cast<std::size_t>(hit.begin() - text.begin());
 }

@@ -103,6 +103,59 @@ TEST_CASE("decimate: many points keep min and max per bucket in time order")
     CHECK(std::count(ov.begin(), ov.end(), -99.0) == 1);
 }
 
+TEST_CASE("lod: a window at every level keeps a spike's min and max; the level obeys 4 x pixels")
+{
+    // 64 * 64 * 8 samples at 1 ms with one spike up and one down; top = 4 gives three levels.
+    const std::size_t n = graph_lod_fan * graph_lod_fan * 8;
+    std::vector<double> t(n), v(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        t[i] = static_cast<double>(i) * 1e-3;
+        v[i] = std::sin(static_cast<double>(i) * 0.01);
+    }
+    v[12345] = 50.0;
+    v[23456] = -50.0;
+    const GraphLod lod = graph_lod_build(t, v, 4);
+    REQUIRE(lod.t.size() == 3);
+    CHECK(lod.t[1].size() == 2 * n / graph_lod_fan);             // 512 buckets, two points each
+    CHECK(lod.t[2].size() == 2 * lod.t[1].size() / graph_lod_fan); // 16 buckets
+    std::vector<double> ot, ov;
+    for (std::size_t level = 0; level < lod.t.size(); ++level)
+    {
+        graph_lod_window(lod, level, 10.0, 30.0, ot, ov); // both spikes (12.345 s, 23.456 s) inside
+        CHECK(std::is_sorted(ot.begin(), ot.end()));
+        CHECK(ot.front() <= 10.0);
+        CHECK(ot.back() >= 30.0);
+        CHECK(*std::max_element(ov.begin(), ov.end()) == 50.0);
+        CHECK(*std::min_element(ov.begin(), ov.end()) == -50.0);
+        graph_lod_window(lod, level, 13.0, 20.0, ot, ov); // neither (but the neighbour before 13 s may be the 12.345 s spike)
+        for (std::size_t i = 0; i < ot.size(); ++i)
+        {
+            CHECK((ot[i] < 13.0 || ot[i] > 20.0 || std::abs(ov[i]) < 50.0));
+        }
+        CHECK(ot.front() <= 13.0);
+        CHECK(ot.back() >= 20.0);
+    }
+    // Level 2 has 16 buckets over the whole series: enough for 4 pixels, not 5; level 1 has 512.
+    CHECK(graph_lod_level(lod, 0.0, 40.0, 4) == 2);
+    CHECK(graph_lod_level(lod, 0.0, 40.0, 5) == 1);
+    CHECK(graph_lod_level(lod, 0.0, 40.0, 129) == 0);
+    const auto buckets = [&](std::size_t level, double x0, double x1)
+    {
+        const std::vector<double>& lt = lod.t[level];
+        const auto lo = std::lower_bound(lt.begin(), lt.end(), x0);
+        const auto hi = std::upper_bound(lo, lt.end(), x1);
+        return static_cast<std::size_t>(hi - lo) / (level == 0 ? 1 : 2);
+    };
+    for (const int px : {1, 2, 3, 4, 5, 50, 77, 78, 79, 100, 2000, 10000})
+    {
+        const std::size_t level = graph_lod_level(lod, 5.0, 25.0, px);
+        CHECK((level == 0 || buckets(level, 5.0, 25.0) >= 4 * static_cast<std::size_t>(px)));
+        CHECK((level + 1 == lod.t.size() || buckets(level + 1, 5.0, 25.0) < 4 * static_cast<std::size_t>(px)));
+    }
+    CHECK(graph_lod_build({}, {}).t.size() == 1); // an empty series is one empty level
+}
+
 TEST_CASE("xy pair: each Y takes the latest X at or before its time (sample-and-hold)")
 {
     // X: 0,1,2,3 at 0,10,20,30 ms; Y: 10,11,12 at 5,15,25 ms -> (0,10), (1,11), (2,12) by hand
@@ -194,6 +247,38 @@ TEST_CASE("graph window draws three Y axes plus a second subplot without asserti
         g.view = view;
         frame();
     }
+    // PNG export: every view and style draws a 4K window off screen; its draw lists (the plot is a
+    // child window) go to main.cpp, the Y ranges are the ones on screen.
+    g.view = GraphView::TimeSeries;
+    frame();
+    REQUIRE(g.y_shown.size() >= 4);
+    CHECK(g.y_shown[0][1] > g.y_shown[0][0]);
+    g.png.size = 4; // 3840 x 2160
+    for (GraphView view : {GraphView::TimeSeries, GraphView::XY, GraphView::Text, GraphView::Gauge})
+    {
+        for (GraphPngStyle style : {GraphPngStyle::Kraken, GraphPngStyle::Light, GraphPngStyle::Print, GraphPngStyle::Transparent})
+        {
+            INFO(static_cast<int>(view), " ", static_cast<int>(style));
+            g.view = view;
+            g.png.style = style;
+            g.png_path = "/tmp/x.png";
+            frame();
+            REQUIRE(app.png_export.has_value());
+            CHECK(app.png_export->w == 3840);
+            CHECK(app.png_export->h == 2160);
+            CHECK(app.png_export->transparent == (style == GraphPngStyle::Transparent));
+            CHECK(app.png_export->lists.size() >= 2); // the window and the plot's child
+            int vertices = 0;
+            for (const ImDrawList* l : app.png_export->lists)
+            {
+                vertices += l->VtxBuffer.Size;
+            }
+            CHECK(vertices > (view == GraphView::Text ? 200 : 1000)); // Text: value cards only
+            CHECK(g.png_path.empty());
+            app.png_export.reset();
+        }
+    }
+    CHECK(graph_png_scale(g.png, 2160) == doctest::Approx(2.4f));
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
 }
@@ -633,4 +718,93 @@ TEST_CASE("remove keeps the XY X signal; a new signal gets an unused colour; Tex
     CHECK(main.x_max == 1.0);
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
+}
+
+#include <chrono>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <thread>
+#include <unistd.h>
+
+#include "db/dbc/dbc_parser.h"
+#include "ui/frame_cache.h"
+
+TEST_CASE("file view: a signal's pyramid is built off the main thread; a zoomed-out window keeps the spike")
+{
+    // 64 * 4096 frames of 0x111 at 1 ms, byte 0 = a sawtooth with one 255 spike: level 1 gets 4096 buckets.
+    const std::size_t n = graph_lod_fan * graph_lod_top;
+    const std::size_t spike = 123'456;
+    const auto src = std::filesystem::temp_directory_path() / std::format("kraken_graph_{}.log", getpid());
+    const auto cache = std::filesystem::temp_directory_path() / std::format("kraken_graph_{}.kfc", getpid());
+    {
+        std::ofstream out(src, std::ios::binary);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            out << std::format("({:.6f}) vcan0 111#{:02X}\n", static_cast<double>(i) * 1e-3, i == spike ? 255 : i % 100);
+        }
+    }
+    {
+        auto built = frame_cache_build(src, cache, TraceFileFormat::CanDump);
+        REQUIRE(built.has_value());
+        frame_cache_close(*built);
+        frame_cache_wait_saved(); // tests reopen it from disk
+    }
+    auto c = frame_cache_open(src, cache);
+    REQUIRE(c.has_value());
+    App app;
+    app.trace_file = std::make_shared<FrameCache>(*c); // closed by hand below
+    trace_open_file(app.trace, app.trace_file->recs, app.trace_file->overflow);
+    SetupNetwork& net = app.setup.networks.emplace_back();
+    net.name = "net";
+    net.can_dbs.push_back(std::make_shared<CanDb>());
+    REQUIRE(dbc_parse("BO_ 273 Msg: 1 ECU\n SG_ Sig : 0|8@1+ (1,0) [0|255] \"\" Vector__XXX\n", *net.can_dbs[0]));
+    setup_rebuild_cache(app.setup);
+
+    GraphState g;
+    GraphSignal& s = g.signals.emplace_back();
+    s.network = "net";
+    s.name = "Sig";
+    s.can_raw_id = 0x111;
+    g.plot_px = 100; // wants 400 buckets: the whole file fits level 1 (4096), a 1 s window does not
+    const auto settle = [&]
+    {
+        for (int i = 0; i < 1000 && (s.lod == nullptr || s.t.empty()); ++i)
+        {
+            graph_ingest(g, app);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    };
+    settle();
+    REQUIRE(s.lod != nullptr);
+    REQUIRE(s.lod->t.size() == 2);
+    CHECK(s.lod->t[0].size() == n);
+    CHECK(g.x_min == 0.0);
+    CHECK(g.x_max == doctest::Approx(static_cast<double>(n - 1) * 1e-3));
+    CHECK(s.t.size() == s.lod->t[1].size()); // the whole file: level 1
+    CHECK(std::count(s.v.begin(), s.v.end(), 255.0) == 1);
+    CHECK(s.seen_min == 0.0);
+    CHECK(s.seen_max == 255.0);
+
+    g.x_min = 123.0; // 1 s around the spike: level 0, every sample
+    g.x_max = 124.0;
+    graph_ingest(g, app);
+    CHECK((s.t.size() >= 1001 && s.t.size() <= 1003)); // 1 s of 1 ms samples plus a neighbour each side
+    CHECK(s.v[static_cast<std::size_t>(std::lower_bound(s.t.begin(), s.t.end(), 123.456) - s.t.begin())] == 255.0);
+    g.x_min = 200.0; // away from it
+    g.x_max = 201.0;
+    graph_ingest(g, app);
+    CHECK(std::count(s.v.begin(), s.v.end(), 255.0) == 0);
+
+    app.setup.generation++; // a setup change rebuilds the pyramid
+    s.t.clear();
+    settle();
+    CHECK(s.lod_generation == app.setup.generation);
+    CHECK((s.t.size() >= 1001 && s.t.size() <= 1003)); // 1 s of 1 ms samples plus a neighbour each side
+
+    g.signals.clear(); // drops the pyramid (and would stop a running job) before the mapping goes
+    app.trace_file.reset();
+    frame_cache_close(*c);
+    std::filesystem::remove(src);
+    std::filesystem::remove(cache);
 }

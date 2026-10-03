@@ -114,7 +114,7 @@ void choose_databases(SetupDialogState& s, int net_index)
     else
     {
         file_dialog_open(s.db_dialog, FileDialogMode::OpenMultiple, "Load CAN Databases", "",
-                         {{"CAN Databases (*.dbc *.sym)", "*.dbc *.sym"}, {"All Files", "*"}});
+                         {{"CAN Databases (*.dbc *.dbf *.sym)", "*.dbc *.dbf *.sym"}, {"All Files", "*"}});
     }
 }
 

@@ -41,9 +41,9 @@ enum class Command
     NewInstrumentPanel,
     NewDbcEditor,
     StandaloneGraph,
-    Gateway,
     ConditionalLogging,
     FindSignal, // Ctrl+P palette, handled by ui/graph
+    Convert,    // File > Convert..., ui/convert
     About,
     Count
 };
@@ -95,5 +95,5 @@ void command_button(App& app, Command cmd, Icon icon, const char* label);
 [[nodiscard]] const char* command_shortcut(const MainMenu& menu, Command cmd);
 
 // Main menu bar, global shortcuts and the control bar below it (Start/Stop pills, Setup
-// Interface..., Graph, Gateway, Record). Call before the dockspace so it gets the rest.
+// Interface..., Graph, Record). Call before the dockspace so it gets the rest.
 void draw_main_menu(App& app);

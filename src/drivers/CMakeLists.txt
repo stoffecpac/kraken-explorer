@@ -18,14 +18,7 @@ target_link_libraries(kraken_drivers PRIVATE PkgConfig::LIBNL)
 target_sources(kraken_drivers PRIVATE linde/linde.cpp usb_vendor/usb_vendor_libusb.cpp)
 target_link_libraries(kraken_drivers PRIVATE PkgConfig::LIBUSB)
 
-# Kvaser (linuxcan CANlib), opt-in because the SDK is not redistributable.
-option(KRAKEN_KVASER "Kvaser driver (needs linuxcan's canlib.h + libcanlib)" OFF)
-
-if(KRAKEN_KVASER)
-    find_path(KVASER_INCLUDE canlib.h REQUIRED)
-    find_library(KVASER_LIB canlib REQUIRED)
-    target_sources(kraken_drivers PRIVATE kvaser.cpp)
-    target_include_directories(kraken_drivers PRIVATE ${KVASER_INCLUDE})
-    target_link_libraries(kraken_drivers PRIVATE ${KVASER_LIB})
-    target_compile_definitions(kraken_drivers PRIVATE KRAKEN_KVASER)
-endif()
+# Kvaser (linuxcan CANlib): the driver is always built; libcanlib is dlopen'ed at run time when
+# installed, so the SDK (not redistributable) is needed neither to build nor to package.
+target_sources(kraken_drivers PRIVATE kvaser.cpp)
+target_link_libraries(kraken_drivers PRIVATE ${CMAKE_DL_LIBS})

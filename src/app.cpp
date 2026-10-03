@@ -126,9 +126,11 @@ void app_trace_save(App& app, const std::string& path)
     const auto format = trace_format_from_path(path);
     if (!format)
     {
-        log_error(std::format("Unknown trace format for {} (use .asc, .candump, .log, .mf4, .pcap, .pcapng or .trc)", path));
+        log_error(std::format("Unknown trace format for {} (use .asc, .blf, .candump, .log, .mf4, .pcap, .pcapng or .trc)", path));
         return;
     }
+    // ponytail: the whole trace in RAM (88 B per frame, a file view decoded); a chunked writer if
+    // exports of 100M-frame files matter.
     const std::vector<BusMessage> msgs = trace_copy(app.trace);
     std::ofstream out(std::filesystem::path(path), std::ios::binary);
     if (!out)
@@ -201,6 +203,7 @@ void app_frame(App& app)
         draw_can_status(app, app.can_status, *tab);
         draw_tx_generator(app, *tab, app.tx_generators[tab->uid]);
         draw_script_window(app, app.script, *tab);
+        draw_value_search(app, app.value_searches[tab->uid], *tab);
         if (menu_take(app.menu, Command::NewReplayView))
         {
             app.replays[tab->uid].open = true;
@@ -248,7 +251,20 @@ void app_frame(App& app)
         }
         if (menu_take(app.menu, Command::NewDbcEditor))
         {
-            app.dbc_editors[tab->uid].open = true;
+            DbcEditorState& ed = app.dbc_editors[tab->uid];
+            ed.open = true;
+            // An empty editor starts on the setup's active DBC (the first; "From setup" picks another).
+            if (ed.path.empty() && ed.db.messages.empty() && !ed.dirty)
+            {
+                for (const SetupNetwork& net : app.setup.networks)
+                {
+                    if (!net.can_dbs.empty())
+                    {
+                        dbc_editor_load(ed, *net.can_dbs.front(), net.can_dbs.front()->path);
+                        break;
+                    }
+                }
+            }
         }
         if (const auto it = app.dbc_editors.find(tab->uid); it != app.dbc_editors.end())
         {
@@ -264,6 +280,7 @@ void app_frame(App& app)
     draw_graph_windows(app, workspace_current(app.workspace));
     draw_setup_dialog(app, app.setup_dialog);
     draw_recording_dialog(app, app.recording_dialog);
+    draw_convert(app, app.convert);
     draw_settings_dialog(app, app.settings_dialog);
     for (auto& [uid, replay] : app.replays)
     {
@@ -272,11 +289,6 @@ void app_frame(App& app)
             draw_replay(app, *it, replay); // also runs autoplay for tabs not shown
         }
     }
-    if (menu_take(app.menu, Command::Gateway))
-    {
-        app.gateway.open = true;
-    }
-    draw_gateway(app, app.gateway);
     draw_help_overlay(app.menu); // "?"
     // Handlers in this frame take their commands with menu_take(); whatever nobody took expires here.
     app.menu.pending.reset();
@@ -292,8 +304,6 @@ void app_init_interfaces(App& app)
         app.recorder.config.folder = (std::filesystem::path(home ? home : ".") / "Documents" / "KrakenExplorer").string();
     }
     app.rx_consumers.push_back({.fn = recorder_rx_consumer, .user = &app.recorder});
-    app.gateway.ifaces = &app.ifaces;
-    app.rx_consumers.push_back({.fn = gateway_rx_consumer, .user = &app.gateway});
     app.rx_consumers.push_back({.fn = python_rx_consumer, .user = &app.python});
     canblast_enabled = app.menu.canblaster;
     ifaces_enumerate(app.ifaces);

@@ -19,6 +19,7 @@ target_sources(kraken_core PRIVATE trace_line_format.cpp pcapng.cpp trace_file_w
 
 # core/trace: chunked trace store + per-interface RX inbox (main-thread drain).
 target_sources(kraken_core PRIVATE trace.cpp png.cpp)
+target_link_libraries(kraken_core PRIVATE ZLIB::ZLIB) # png.cpp
 
 # core/trace_recorder: streaming recording to ASC/candump/pcapng while armed.
 target_sources(kraken_core PRIVATE trace_recorder.cpp)

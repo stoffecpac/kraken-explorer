@@ -136,7 +136,7 @@ int main(int argc, char* argv[])
 
     for (const TraceFileFormat format : { TraceFileFormat::CanDump, TraceFileFormat::VectorAsc,
                                           TraceFileFormat::VectorMdf, TraceFileFormat::Pcap,
-                                          TraceFileFormat::PcapNg, TraceFileFormat::Trc })
+                                          TraceFileFormat::PcapNg, TraceFileFormat::Trc, TraceFileFormat::Blf })
     {
         const std::string extension(trace_format_extension(format));
         std::ofstream file(out / ("export." + extension), std::ios::binary);

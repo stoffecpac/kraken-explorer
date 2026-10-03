@@ -23,7 +23,7 @@ enum class LogFilterLevel : uint8_t
 };
 inline constexpr size_t log_filter_levels = 4;
 
-// The docked "Log" window (old LogWindow): level toggles with counts, a fuzzy search, Time /
+// The docked "Log" window (old LogWindow): level toggles with counts, a ripgrep-style search (smart case), Time /
 // Level / Text of the lines that pass, Clear, Export. Lines are addressed by their absolute
 // index (0 = first line ever logged; the ring holds [total - entries.size(), total)).
 struct LogWindowState
@@ -31,7 +31,7 @@ struct LogWindowState
     uint64_t seen_total = 0; // log_state().total last drawn; a change scrolls to the bottom if it was there
     FileDialog export_dialog;
     VimNav vim; // j/k/gg/G/Ctrl+d.. scroll the lines, h/l scroll sideways, / focuses the search
-    std::string query;                              // fuzzy_score pattern, empty = all lines
+    std::string query;                              // smart_find substring, empty = all lines
     std::array<bool, log_filter_levels> show{true, true, true, true};
     std::array<size_t, log_filter_levels> counts{}; // lines per level in the log (ignoring the filter)
     std::deque<uint64_t> rows;                      // absolute index of each shown line, oldest first

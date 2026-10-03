@@ -37,3 +37,13 @@ TEST_CASE("frame rate covers only the measurement's own frames")
     status_bar_sample(s, true, 60100, t0 + 12s);
     CHECK(s.rate == doctest::Approx(50.0)); // 100 frames in 2 s
 }
+
+TEST_CASE("a notice survives the frame rate sampling")
+{
+    StatusBarState s;
+    status_bar_notice(s, "x.blf changed on disk: reloaded");
+    status_bar_sample(s, false, 0, std::chrono::steady_clock::now());
+    status_bar_sample(s, true, 10, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    CHECK(s.notice == "x.blf changed on disk: reloaded");
+    CHECK(s.notice_until > std::chrono::steady_clock::now());
+}

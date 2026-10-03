@@ -3,9 +3,9 @@
 # Usage: scripts/build_deb.sh [build-dir]   (default: build/deb)
 # Maintainer defaults to `git config user.name/user.email`; override with
 # DEB_MAINTAINER="Name <mail>". Set JOBS to limit the build parallelism.
-# CMAKE_ARGS: extra configure flags (CI: -DKRAKEN_KVASER=ON). BUNDLE_LIBS: shared
+# CMAKE_ARGS: extra configure flags. BUNDLE_LIBS: shared
 # libraries (paths, globs) shipped in usr/lib/<multiarch> because no package provides
-# them (CI: Kvaser's libcanlib built from linuxcan).
+# libraries to ship next to the binary (none by default).
 set -eu
 cd "$(dirname "$0")/.."
 BUILD=${1:-build/deb}

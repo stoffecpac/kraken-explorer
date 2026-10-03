@@ -5,10 +5,13 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,40 @@ enum class GraphSignalKind : uint8_t { Can, Lin, BusLoad };
 
 // Plot slots: slot / graph_axes_per_plot = subplot row, slot % graph_axes_per_plot = Y1..Y3.
 inline constexpr int graph_axes_per_plot = 3;
+
+// File view: min/max pyramid of a signal's whole series, so a window at any zoom costs
+// O(pixels) and no spike is lost. Level 0 is the series; level L > 0 holds, per bucket of
+// graph_lod_fan consecutive points of level L - 1, that bucket's minimum and maximum sample
+// (their own timestamps, in time order), so a window read at a level keeps every extreme as
+// long as its buckets are narrower than a pixel.
+// ponytail: level 0 is doubles (88 MB for a 5.5 M-sample signal); float32 values, or dropping
+// level 0 and decoding fine zooms from the frame cache, when memory shows up.
+inline constexpr std::size_t graph_lod_fan = 64;
+inline constexpr std::size_t graph_lod_top = 4096; // no level above one with fewer buckets than this
+
+struct GraphLod
+{
+    std::vector<std::vector<double>> t; // per level, time order
+    std::vector<std::vector<double>> v;
+};
+
+// Level 0 = (t, v), then levels of graph_lod_fan while the next one would have >= top buckets.
+[[nodiscard]] GraphLod graph_lod_build(std::vector<double> t, std::vector<double> v, std::size_t top = graph_lod_top);
+// Coarsest level with at least 4 * pixels buckets (level 0: samples) inside [x0, x1], else 0.
+[[nodiscard]] std::size_t graph_lod_level(const GraphLod& lod, double x0, double x1, int pixels);
+// Points of `level` in [x0, x1] plus one neighbour each side, into out_* (as graph_decimate).
+void graph_lod_window(const GraphLod& lod, std::size_t level, double x0, double x1, std::vector<double>& out_t,
+                      std::vector<double>& out_v);
+
+struct FrameCache;
+
+// A pyramid being decoded off the main thread; `result` is set before `done`.
+struct GraphLodJob
+{
+    std::shared_ptr<const GraphLod> result;
+    std::atomic<bool> done{false};
+    std::jthread thread; // last member: joined before the others go
+};
 
 struct GraphSignal
 {
@@ -63,9 +100,37 @@ struct GraphSignal
     std::array<double, 5> stats{};       // Statistics columns: min, max, mean, median, std dev (NaN = none)
     std::array<double, 4> stats_key{0.0, 0.0, -1.0, 0.0}; // (x_min, x_max, samples, newest t) of `stats`
     double stats_wall = -1e9;            // wall_seconds() of the last recompute
+    std::vector<double> dec_t;           // decimated points of the last plot (graph_decimate), reused while
+    std::vector<double> dec_v;           // the window, the pixel width and the samples are unchanged
+    std::array<double, 5> dec_key{};     // (x_min, x_max, buckets, samples, downsample) of dec_*
     std::array<double, 3> at_cursor{};   // value at cursor A, at B, B - A (NaN = none); graph_cursor_values
     std::array<double, 4> cursor_key{0.0, 0.0, -1.0, 0.0}; // (A, B, samples, newest t) of `at_cursor`
+    std::shared_ptr<const GraphLod> lod; // file view: pyramid of the whole file, t and v are a window of it
+    std::shared_ptr<GraphLodJob> lod_job; // the pyramid being built; nothing is drawn meanwhile
+    std::weak_ptr<const FrameCache> lod_file; // the file and setup generation `lod` / `lod_job` are of
+    uint64_t lod_generation = 0;
 };
+
+// "Export to PNG" options (the graph's export dialog).
+enum class GraphPngStyle : uint8_t { Kraken, Light, Print, Transparent };
+struct GraphPngOptions
+{
+    int size = 0;         // index in graph_png_sizes: 0 = as on screen, last = custom
+    int width = 1920;     // custom size
+    int height = 1080;
+    int scale = 0;        // index in graph_png_scales: 0 = auto (by the height)
+    GraphPngStyle style = GraphPngStyle::Kraken;
+    std::string title;    // empty = the visible signals' names
+    bool subtitle = true; // time range and signal count
+    bool legend = true;
+    bool cursors = true;  // cursor lines and values, when the cursors are on
+    bool watermark = true;
+};
+
+// Width x height of size index i (0: the plot as on screen, w / h; last: the custom size).
+[[nodiscard]] std::pair<int, int> graph_png_size(const GraphPngOptions& o, float screen_w, float screen_h);
+// Text and line scale for o at height h (auto: 1x per ~900 px, 1..4).
+[[nodiscard]] float graph_png_scale(const GraphPngOptions& o, int h);
 
 struct GraphState
 {
@@ -108,10 +173,20 @@ struct GraphState
     bool slots_dirty = true;
     std::vector<double> stride_t; // downsampled points, reused every frame
     std::vector<double> stride_v;
+    std::array<double, 5> file_key{}; // file view: (x_min, x_max, signals, setup generation, plot_px) of the decoded window
+    int plot_px = 1024;       // file view: plot width in pixels at the last draw, picks the pyramid level
+    double log_t = -1.0;      // file view: the Log's top row on the X axis (a line), < 0 = none
+    double click_t = -1.0;    // file view: a click in the plot at this X moves the Log there, < 0 = none
     std::vector<double> scratch_t; // decimated points, reused every frame
     std::vector<double> scratch_v;
     FileDialog export_dialog; // "Export plot to *.csv" / "Export to PNG" (by extension)
-    float view_x = 0.0f, view_y = 0.0f, view_w = 0.0f, view_h = 0.0f; // the plot area on screen, for the PNG export
+    float view_w = 0.0f, view_h = 0.0f; // the plot area on screen ("as on screen" export size)
+    GraphPngOptions png;
+    bool png_dialog = false;  // open the options popup next frame
+    std::string png_path;     // chosen file: drawn off screen this frame, rendered by main.cpp
+    std::string png_last = "graph.png"; // the last export's path: the next one starts there
+    std::vector<std::array<double, 2>> y_shown; // per slot: the Y range on screen, so the export matches it
+    std::array<double, 4> xy_shown{};           // XY view: x min / max, y min / max on screen
 };
 
 // Plot slot per signal (same order): manual `axis` wins. Automatic ones share a slot when they
@@ -145,6 +220,10 @@ const std::array<double, 3>& graph_cursor_values(GraphSignal& s, double a, doubl
 [[nodiscard]] uint32_t graph_next_color(const GraphState& g);
 // Removes signal i; the XY X signal keeps pointing at the same signal.
 void graph_remove_signal(GraphState& g, std::size_t i);
+
+// Adds e (unless present) and shows [t0, t1] (absolute ns) with some margin, cursors A and B on
+// its ends: Value Search hits.
+void graph_show_range(GraphState& g, const Setup& setup, const SignalEntry& e, int64_t t0_ns, int64_t t1_ns);
 
 // One <graph> child of the workspace <tab> per open graph: view settings and the signals by
 // name (network + message + signal, bus load by driver + interface), not their samples.

@@ -533,7 +533,7 @@ void instrument_panel_ingest(InstrumentPanel& p, const Setup& setup, const Trace
         p.setup_generation = setup.generation;
         instrument_panel_resolve(p, setup);
     }
-    const uint64_t first = std::max(p.next_index, trace.begin);
+    const uint64_t first = trace.file.empty() ? std::max(p.next_index, trace.begin) : trace.end; // a file view is not live
     p.next_index = trace.end;
     if (p.items.empty())
     {

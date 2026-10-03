@@ -33,9 +33,7 @@ extern const DriverOps slcan_driver;
 extern const DriverOps grip_driver;
 extern const DriverOps canblast_driver;
 extern const DriverOps linde_driver;
-#ifdef KRAKEN_KVASER
 extern const DriverOps kvaser_driver;
-#endif
 
 namespace
 {
@@ -46,9 +44,7 @@ constexpr const DriverOps* drivers[] = {
     &grip_driver,
     &canblast_driver,
     &linde_driver,
-#ifdef KRAKEN_KVASER
     &kvaser_driver,
-#endif
 };
 
 constexpr int listener_batch = 256;

@@ -115,7 +115,8 @@ struct Palette
 
 // "Abyss": deep blue-teal water, bioluminescent teal accent, sea-foam text.
 static constexpr Palette abyss = {
-    .text = 0xd8f3ef, .text_dim = 0x6f9ca1, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x123640,
+    // text_dim >= 4.5:1 on the alternate table row (alt), 7:1 on bg (WCAG AA for the dim info text).
+    .text = 0xd8f3ef, .text_dim = 0x7fb0b5, .bg = 0x0a1f26, .deep = 0x061418, .alt = 0x123640,
     .popup = 0x08191e, .frame = 0x10303a, .frame_hov = 0x16414d, .frame_act = 0x1b5260,
     .title = 0x08191e, .title_act = 0x0e2e36, .button = 0x123843, .border = 0x1e4a55,
     .grid = 0x143640, .accent = 0x19d3c5, .accent_hi = 0x5ff0e4, .select = 0x0f6b73,
@@ -319,7 +320,7 @@ void theme_apply(bool dark)
     style.ItemSpacing = ImVec2(8.0f, 6.0f);
     style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
     style.DockingSeparatorSize = 4.0f;
-    style.ScrollbarSize = 10.0f;
+    style.ScrollbarSize = 16.0f; // wide enough to see and grab in long trace tables
     apply_palette(style.Colors, dark, dark ? abyss : shallows);
     apply_plot_colormap(dark);
 }

@@ -146,7 +146,7 @@ TEST_CASE("control bar buttons trigger their commands, also when it wraps")
 
         // The Start pill is taller than a normal frame, so the bar is too.
         CHECK(height > ImGui::GetFrameHeight() + 8.0f);
-        REQUIRE(click_control_bar(app, "Release the Kraken"));
+        REQUIRE(click_control_bar(app, "Release the Kraken", "##icon_text"));
         CHECK(menu_take(app.menu, Command::MeasurementStart));
 
         REQUIRE(click_control_bar(app, "Record", "##icon_text"));
@@ -155,6 +155,12 @@ TEST_CASE("control bar buttons trigger their commands, also when it wraps")
 
         REQUIRE(click_control_bar(app, "Setup Interface...", "##icon_text"));
         CHECK(menu_take(app.menu, Command::Setup));
+        REQUIRE(click_control_bar(app, "Replay", "##icon_text"));
+        CHECK(menu_take(app.menu, Command::NewReplayView));
+        REQUIRE(click_control_bar(app, "DBC Editor", "##icon_text"));
+        CHECK(menu_take(app.menu, Command::NewDbcEditor));
+        REQUIRE(click_control_bar(app, "Convert", "##icon_text"));
+        CHECK(menu_take(app.menu, Command::Convert));
         app.measuring = true; // disabled like the menu item while measuring (still hovered)
         REQUIRE(click_control_bar(app, "Setup Interface...", "##icon_text"));
         CHECK_FALSE(menu_take(app.menu, Command::Setup));

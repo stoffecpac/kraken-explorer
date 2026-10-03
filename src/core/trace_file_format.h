@@ -40,12 +40,13 @@ enum class TraceFileFormat
     VectorMdf,  // Vector MDF4
     Pcap,       // pcap, LINKTYPE_CAN_SOCKETCAN
     PcapNg,     // pcapng, LINKTYPE_CAN_SOCKETCAN
-    Trc         // PEAK PCAN trace, version 2.1
+    Trc,        // PEAK PCAN trace, version 2.1
+    Blf         // Vector binary logging format
 };
 
-inline constexpr std::array<TraceFileFormat, 6> trace_file_formats = {
+inline constexpr std::array<TraceFileFormat, 7> trace_file_formats = {
     TraceFileFormat::CanDump, TraceFileFormat::VectorAsc, TraceFileFormat::VectorMdf,
-    TraceFileFormat::Pcap, TraceFileFormat::PcapNg, TraceFileFormat::Trc,
+    TraceFileFormat::Pcap, TraceFileFormat::PcapNg, TraceFileFormat::Trc, TraceFileFormat::Blf,
 };
 
 // File extension for a format, without the leading dot.
@@ -59,6 +60,7 @@ inline constexpr std::array<TraceFileFormat, 6> trace_file_formats = {
         case TraceFileFormat::Pcap:      return "pcap";
         case TraceFileFormat::PcapNg:    return "pcapng";
         case TraceFileFormat::Trc:       return "trc";
+        case TraceFileFormat::Blf:       return "blf";
     }
     return {};
 }
@@ -90,6 +92,7 @@ inline constexpr std::array<TraceFileFormat, 6> trace_file_formats = {
     if (key == "pcap")                                     { return TraceFileFormat::Pcap; }
     if (key == "pcapng")                                   { return TraceFileFormat::PcapNg; }
     if (key == "trc")                                      { return TraceFileFormat::Trc; }
+    if (key == "blf")                                      { return TraceFileFormat::Blf; }
     return std::nullopt;
 }
 

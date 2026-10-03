@@ -66,14 +66,20 @@ TEST_CASE("level counts and toggles")
     CHECK(s.rows.size() == 6);
 }
 
-TEST_CASE("fuzzy query")
+TEST_CASE("query: ripgrep smart-case substring")
 {
     fill();
     LogWindowState s;
-    s.query = "opcan"; // o-p...c-a-n: subsequence of both "open" lines, by hand
+    s.query = "open"; // lower case: any case
     update(s);
     CHECK(shown(s) == std::vector<std::string>{"opened vcan0", "cannot open can1"});
-    s.query = "MSTART"; // case-insensitive: "Measurement STARTed"
+    s.query = "opcan"; // a substring, not a subsequence
+    update(s);
+    CHECK(s.rows.empty());
+    s.query = "Measurement"; // an upper-case letter: exact case
+    update(s);
+    CHECK(s.rows.empty());
+    s.query = "started";
     update(s);
     CHECK(shown(s) == std::vector<std::string>{"measurement started"});
     s.query = "zzz";

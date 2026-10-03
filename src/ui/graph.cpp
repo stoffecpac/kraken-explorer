@@ -20,6 +20,7 @@
 #include "db/model/can_db.h"
 #include "db/model/lin_db.h"
 #include "core/stats.h"
+#include "core/text.h"
 #include "ui/depth_gauge.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -41,6 +42,25 @@ constexpr const char* drag_payload = "GRAPH_SIGNAL";
 double wall_seconds()
 {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// X axis ticks and mouse readout: seconds below a minute ("12.5"), then m:ss, h:mm:ss, Nd hh:mm:ss.
+// user_data: the GraphState. A window shorter than a day drops the day from every tick ("19:38:50",
+// not "12d 19:38:50"): ImPlot spaces ticks without measuring them, and the long labels overlapped.
+int format_time_tick(double value, char* buf, int size, void* user_data)
+{
+    if (std::abs(value) < 60.0)
+    {
+        return std::snprintf(buf, static_cast<std::size_t>(size), "%g", value);
+    }
+    const auto* g = static_cast<const GraphState*>(user_data);
+    if (g != nullptr && g->x_max - g->x_min < 86400.0 && value >= 86400.0)
+    {
+        value = std::fmod(value, 86400.0);
+    }
+    const bool whole = std::abs(value - std::round(value)) < 1e-6;
+    const std::string text = format_duration(value, whole ? 0 : 3);
+    return std::snprintf(buf, static_cast<std::size_t>(size), "%s", text.c_str());
 }
 
 void push_sample(GraphSignal& s, double t, double v)
@@ -82,10 +102,14 @@ void clear_samples(GraphState& g)
         s.load_window.clear();
         s.load_bits = 0;
         s.load_emitted = -1.0;
+        s.lod.reset(); // a new trace: the pyramid of the old file would only hold memory
+        s.lod_job.reset();
+        s.lod_file.reset();
     }
     g.start_ns = -1;
     g.last_t = 0.0;
     g.follow = true;
+    g.file_key = {};
 }
 
 // Newest time on the X axis: while measuring it keeps running between frames.
@@ -98,6 +122,17 @@ double graph_now(const GraphState& g, bool measuring)
 ImVec4 cursor_color(int k)
 {
     return k == 0 ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark) : ImGui::ColorConvertU32ToFloat4(theme_text(ThemeText::warn));
+}
+
+// A signal colour as the PNG export draws it: the app's palette is made for a dark background, so
+// the light styles darken it (yellow and light teal on white were hard to read).
+ImVec4 png_color(const GraphPngOptions* png, ImVec4 c)
+{
+    if (png != nullptr && (png->style == GraphPngStyle::Light || png->style == GraphPngStyle::Print))
+    {
+        return ImVec4(c.x * 0.72f, c.y * 0.72f, c.z * 0.72f, c.w);
+    }
+    return c;
 }
 
 void update_cursor_values(GraphState& g)
@@ -359,8 +394,34 @@ void draw_signal_tree(App& app, GraphState& g)
     }
 }
 
-// The active signals: colour, value (A, B and B - A when the cursors are on), plot slot. Rows drag onto
-// a Y axis; right-click for the axis, visibility and removal.
+// ponytail: recomputed when (x range, samples, newest t) changed, at most every 250 ms,
+// so a following window under a flood costs one O(visible points) pass per 250 ms,
+// not per frame. Incremental min/max/mean + a two-heap median if that is still too slow.
+// Between the cursors when they are on (MCUViewer's "select range"), else the visible window.
+void update_stats(const GraphState& g, GraphSignal& s)
+{
+    const double from = g.cursor_on ? std::min(g.cursor_a, g.cursor_b) : g.x_min;
+    const double to = g.cursor_on ? std::max(g.cursor_a, g.cursor_b) : g.x_max;
+    const std::array<double, 4> key{from, to, static_cast<double>(s.t.size()), s.t.empty() ? 0.0 : s.t.back()};
+    if (const double now = wall_seconds(); key != s.stats_key && now - s.stats_wall >= 0.25)
+    {
+        static std::vector<double> scratch; // main thread only, reused so it stops growing
+        const auto lo = std::lower_bound(s.t.begin(), s.t.end(), from);
+        const auto hi = std::upper_bound(lo, s.t.end(), to);
+        const auto first = s.v.begin() + (lo - s.t.begin());
+        scratch.assign(first, first + (hi - lo));
+        const Stats st = stats_of(scratch);
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        s.stats = scratch.empty() ? std::array{nan, nan, nan, nan, nan}
+                                  : std::array{st.min, st.max, st.mean, st.median, st.stddev};
+        s.stats_key = key;
+        s.stats_wall = now;
+    }
+}
+
+// The active signals: colour, value (A, B and B - A when the cursors are on), plot slot, with the
+// selected signal's statistics below. Rows drag onto a Y axis; right-click for the axis, visibility
+// and removal.
 void draw_signal_list(GraphState& g, std::span<const int> slots)
 {
     const int slot_count = slots.empty() ? 1 : *std::max_element(slots.begin(), slots.end()) + 1;
@@ -389,15 +450,16 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
     {
         ImGui::TextUnformatted(std::format("\u0394Y = {:.6g}  (Y1 {:.6g}, Y2 {:.6g})", g.cursor_y2 - g.cursor_y1, g.cursor_y1, g.cursor_y2).c_str());
     }
-    constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_ScrollY
-                                      | ImGuiTableFlags_SizingStretchProp;
+    // No ScrollY: the ##list child scrolls the table and the statistics below it together.
+    constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp;
     // Different ids per column count: ImGui keeps column state per table id.
-    const int columns = 3 + (g.cursor_on ? 2 : 0) + (g.statistics ? 5 : 0);
+    const int columns = 3 + (g.cursor_on ? 2 : 0);
+    const bool stats_on = g.statistics && count > 0;
+    const int stats_sel = stats_on ? std::max(g.selected, 0) : -1; // none picked: the first signal
     if (!ImGui::BeginTable(std::format("##active{}", columns).c_str(), columns, flags))
     {
         return;
     }
-    ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("Signal", ImGuiTableColumnFlags_WidthStretch, 3.0f);
     if (g.cursor_on)
     {
@@ -410,14 +472,6 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
         ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.5f);
     }
     ImGui::TableSetupColumn("Axis", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-    if (g.statistics)
-    {
-        ImGui::TableSetupColumn("Min", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Max", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Mean", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Median", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Std dev", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-    }
     ImGui::TableHeadersRow();
     int remove = -1;
     for (int i = 0; i < static_cast<int>(g.signals.size()); ++i)
@@ -510,38 +564,31 @@ void draw_signal_list(GraphState& g, std::span<const int> slots)
         {
             ImGui::Text("%sY%d/%d", s.axis < 0 ? "" : "*", slot % graph_axes_per_plot + 1, slot / graph_axes_per_plot + 1);
         }
-        if (g.statistics)
-        {
-            // ponytail: recomputed when (x range, samples, newest t) changed, at most every 250 ms,
-            // so a following window under a flood costs one O(visible points) pass per 250 ms,
-            // not per frame. Incremental min/max/mean + a two-heap median if that is still too slow.
-            // Between the cursors when they are on (MCUViewer's "select range"), else the visible window.
-            const double from = g.cursor_on ? std::min(g.cursor_a, g.cursor_b) : g.x_min;
-            const double to = g.cursor_on ? std::max(g.cursor_a, g.cursor_b) : g.x_max;
-            const std::array<double, 4> key{from, to, static_cast<double>(s.t.size()), s.t.empty() ? 0.0 : s.t.back()};
-            if (const double now = wall_seconds(); key != s.stats_key && now - s.stats_wall >= 0.25)
-            {
-                static std::vector<double> scratch; // main thread only, reused so it stops growing
-                const auto lo = std::lower_bound(s.t.begin(), s.t.end(), from);
-                const auto hi = std::upper_bound(lo, s.t.end(), to);
-                const auto first = s.v.begin() + (lo - s.t.begin());
-                scratch.assign(first, first + (hi - lo));
-                const Stats st = stats_of(scratch);
-                const double nan = std::numeric_limits<double>::quiet_NaN();
-                s.stats = scratch.empty() ? std::array{nan, nan, nan, nan, nan}
-                                          : std::array{st.min, st.max, st.mean, st.median, st.stddev};
-                s.stats_key = key;
-                s.stats_wall = now;
-            }
-            for (double x : s.stats)
-            {
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(graph_format_value(s, x).c_str());
-            }
-        }
         ImGui::PopID();
     }
     ImGui::EndTable();
+    if (stats_on)
+    {
+        GraphSignal& s = g.signals[static_cast<std::size_t>(stats_sel)];
+        update_stats(g, s);
+        // One row per value: 5 stat columns next to the signals made the list too wide.
+        ImGui::TextUnformatted(std::format("Statistics: {}", s.name).c_str());
+        if (ImGui::BeginTable("##stats", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH))
+        {
+            ImGui::TableSetupColumn("##stat", ImGuiTableColumnFlags_WidthFixed);
+            ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+            constexpr std::array labels{"Min", "Max", "Mean", "Median", "Std dev"};
+            for (std::size_t k = 0; k < labels.size(); ++k)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(labels[k]);
+                ImGui::TableNextColumn();
+                ImGui::Text("%s %s", graph_format_value(s, s.stats[k]).c_str(), s.unit.c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
     if (remove >= 0)
     {
         graph_remove_signal(g, static_cast<std::size_t>(remove));
@@ -589,7 +636,7 @@ void stop_follow_on_user_zoom(GraphState& g, bool cursor_held)
 }
 
 // Y signals against the X signal over the time window, e.g. lat/lon track or RPM vs speed.
-void draw_xy(App& app, GraphState& g)
+void draw_xy(App& app, GraphState& g, const GraphPngOptions* png = nullptr)
 {
     if (g.signals.size() < 2)
     {
@@ -607,15 +654,23 @@ void draw_xy(App& app, GraphState& g)
             y_label += (y_label.empty() ? "" : ", ") + with_unit(g.signals[i]);
         }
     }
-    if (!ImPlot::BeginPlot("##xy", ImGui::GetContentRegionAvail()))
+    if (!ImPlot::BeginPlot("##xy", ImGui::GetContentRegionAvail(), png != nullptr && !png->legend ? ImPlotFlags_NoLegend : ImPlotFlags_None))
     {
         return;
     }
     const std::string x_label = with_unit(xs);
     // Fit while following; a zoom or pan stops following (Reset Zoom resumes), as in the time series.
-    const ImPlotAxisFlags fit = g.follow ? ImPlotAxisFlags_AutoFit : ImPlotAxisFlags_None;
+    // The PNG export shows the range on screen.
+    const ImPlotAxisFlags fit = g.follow && png == nullptr ? ImPlotAxisFlags_AutoFit : ImPlotAxisFlags_None;
     ImPlot::SetupAxes(x_label.c_str(), y_label.c_str(), fit, fit);
-    stop_follow_on_user_zoom(g, false);
+    if (png != nullptr && g.xy_shown[1] > g.xy_shown[0] && g.xy_shown[3] > g.xy_shown[2])
+    {
+        ImPlot::SetupAxesLimits(g.xy_shown[0], g.xy_shown[1], g.xy_shown[2], g.xy_shown[3], ImPlotCond_Always);
+    }
+    if (png == nullptr)
+    {
+        stop_follow_on_user_zoom(g, false);
+    }
     const float px = ImGui::GetFontSize() / 15.0f;
     update_cursor_values(g);
     for (std::size_t i = 0; i < g.signals.size(); ++i)
@@ -632,7 +687,7 @@ void draw_xy(App& app, GraphState& g)
         {
             continue;
         }
-        const ImVec4 color = ImGui::ColorConvertU32ToFloat4(s.color);
+        const ImVec4 color = png_color(png, ImGui::ColorConvertU32ToFloat4(s.color));
         const std::string label = std::format("{}##{}", s.name, i);
         ImPlotSpec spec;
         spec.LineColor = color;
@@ -645,7 +700,7 @@ void draw_xy(App& app, GraphState& g)
             spec.MarkerSize = 5.0f * px;
             ImPlot::PlotScatter(label.c_str(), &g.scratch_t.back(), &g.scratch_v.back(), 1, spec);
         }
-        for (int k = 0; g.cursor_on && k < 2; ++k) // the curve's point at cursor time A / B
+        for (int k = 0; g.cursor_on && (png == nullptr || png->cursors) && k < 2; ++k) // the curve's point at cursor time A / B
         {
             const double x = xs.at_cursor[static_cast<std::size_t>(k)];
             const double y = s.at_cursor[static_cast<std::size_t>(k)];
@@ -658,10 +713,17 @@ void draw_xy(App& app, GraphState& g)
             }
         }
     }
+    if (png == nullptr)
+    {
+        const ImPlotRect r = ImPlot::GetPlotLimits();
+        g.xy_shown = {r.X.Min, r.X.Max, r.Y.Min, r.Y.Max};
+    }
     ImPlot::EndPlot();
 }
 
-void draw_plots(App& app, GraphState& g, std::span<const int> slots)
+// png: drawn for the PNG export (off screen, no input): the Y ranges on screen, its own decimation,
+// cursors as static lines, legend and cursor values as chosen.
+void draw_plots(App& app, GraphState& g, std::span<const int> slots, const GraphPngOptions* png = nullptr)
 {
     const int slot_count = slots.empty() ? 1 : *std::max_element(slots.begin(), slots.end()) + 1;
     const int rows = (slot_count + graph_axes_per_plot - 1) / graph_axes_per_plot;
@@ -682,10 +744,17 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
         return std::format("{}##row{}", title.empty() ? "Graph" : title, row);
     };
 
+    if (g.y_shown.size() < static_cast<std::size_t>(rows * graph_axes_per_plot))
+    {
+        g.y_shown.resize(static_cast<std::size_t>(rows * graph_axes_per_plot), {0.0, 0.0});
+    }
+    const float line_scale = png != nullptr && png->style == GraphPngStyle::Print ? 1.4f : 1.0f; // print: bolder curves
     const auto plot_row = [&](int row)
     {
-        ImPlot::SetupAxis(ImAxis_X1, row == rows - 1 ? "time[s]" : nullptr);
+        ImPlot::SetupAxis(ImAxis_X1, row == rows - 1 ? "time" : nullptr);
+        ImPlot::SetupAxisFormat(ImAxis_X1, format_time_tick, &g);
         ImPlot::SetupAxisLinks(ImAxis_X1, &g.x_min, &g.x_max);
+        bool used[graph_axes_per_plot] = {};
         for (int k = 0; k < graph_axes_per_plot; ++k)
         {
             const int slot = row * graph_axes_per_plot + k;
@@ -716,44 +785,99 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
                 label = first->unit.empty() ? first->name : std::format("{} [{}]", first->name, first->unit);
             }
             ImPlotAxisFlags flags = k > 0 ? ImPlotAxisFlags_AuxDefault : ImPlotAxisFlags_None;
-            flags |= g.follow ? ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit : ImPlotAxisFlags_None;
+            // A file view keeps fitting Y to the visible window: its samples are that window only.
+            flags |= png == nullptr && (g.follow || !app.trace.file.empty()) ? ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit
+                                                                              : ImPlotAxisFlags_None;
             if (first != nullptr)
             {
-                ImPlot::PushStyleColor(ImPlotCol_AxisText, first->color);
+                ImPlot::PushStyleColor(ImPlotCol_AxisText, png_color(png, ImGui::ColorConvertU32ToFloat4(first->color)));
             }
             ImPlot::SetupAxis(ImAxis_Y1 + k, label.empty() ? nullptr : label.c_str(), flags);
+            const std::array<double, 2>& shown = g.y_shown[static_cast<std::size_t>(slot)];
+            if (png != nullptr && shown[1] > shown[0])
+            {
+                ImPlot::SetupAxisLimits(ImAxis_Y1 + k, shown[0], shown[1], ImPlotCond_Always);
+            }
             if (first != nullptr)
             {
                 ImPlot::PopStyleColor();
             }
+            used[k] = true;
         }
         ImPlot::SetupFinish();
+        for (int k = 0; png == nullptr && k < graph_axes_per_plot; ++k)
+        {
+            if (used[k])
+            {
+                const ImPlotRange y = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1 + k).Y;
+                g.y_shown[static_cast<std::size_t>(row * graph_axes_per_plot + k)] = {y.Min, y.Max};
+            }
+        }
+        if (g.log_t >= 0.0) // the Log's position (file view)
+        {
+            ImPlotSpec line;
+            line.LineColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            line.LineWeight = 1.0f;
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+            ImPlot::PlotInfLines("##log", &g.log_t, 1, line);
+        }
+        if (png == nullptr && ImPlot::IsPlotHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
+            && ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 9.0f) // a click, not a pan
+        {
+            g.click_t = ImPlot::GetPlotMousePos(ImAxis_X1).x;
+        }
 
         const int buckets = std::max(1, static_cast<int>(ImPlot::GetPlotSize().x));
+        if (png == nullptr)
+        {
+            g.plot_px = buckets; // for the next file-view window (one frame late is fine)
+        }
+        std::vector<double> png_t; // the export's own decimation: the screen's cache stays as it is
+        std::vector<double> png_v;
         const float px = ImGui::GetFontSize() / 15.0f;
         for (std::size_t i = 0; i < g.signals.size(); ++i)
         {
-            const GraphSignal& s = g.signals[i];
+            GraphSignal& s = g.signals[i];
             if (slots[i] / graph_axes_per_plot != row || s.hidden)
             {
                 continue;
             }
             ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1 + slots[i] % graph_axes_per_plot);
             const auto [t, v] = stride(g, s);
-            graph_decimate(t, v, g.x_min, g.x_max, buckets, g.scratch_t, g.scratch_v);
-            const ImVec4 color = ImGui::ColorConvertU32ToFloat4(s.color);
+            // Decimated once per change of window / width / samples, not per frame (perf: 2-4 % of the
+            // main thread went to re-decimating an unchanged view on every redraw).
+            const std::array<double, 5> key{g.x_min, g.x_max, static_cast<double>(buckets), static_cast<double>(t.size()),
+                                            static_cast<double>(g.downsample)};
+            if (png != nullptr)
+            {
+                graph_decimate(t, v, g.x_min, g.x_max, buckets, png_t, png_v);
+            }
+            else if (key != s.dec_key)
+            {
+                s.dec_key = key;
+                graph_decimate(t, v, g.x_min, g.x_max, buckets, s.dec_t, s.dec_v);
+            }
+            const std::vector<double>& dt = png != nullptr ? png_t : s.dec_t;
+            const std::vector<double>& dv = png != nullptr ? png_v : s.dec_v;
+            const ImVec4 color = png_color(png, ImGui::ColorConvertU32ToFloat4(s.color));
             ImPlotSpec spec;
             spec.LineColor = color;
             spec.FillColor = color;
-            if (g.dots)
+            // Dots only while the samples are sparse: after min/max decimation there are two points
+            // per pixel column and markers would only thicken the line (and double the vertex count).
+            if (g.dots && dt.size() < static_cast<std::size_t>(buckets) / 2)
             {
-                spec.Marker = ImPlotMarker_Circle;
+                // A marker shape per signal, so series are not told apart by hue alone (ui-ux-pro-max:
+                // charts, accessibility); the shape cycles with the slot's colour index.
+                constexpr ImPlotMarker shapes[] = {ImPlotMarker_Circle, ImPlotMarker_Square, ImPlotMarker_Diamond,
+                                                   ImPlotMarker_Up, ImPlotMarker_Down, ImPlotMarker_Cross};
+                spec.Marker = shapes[i % std::size(shapes)];
                 spec.MarkerSize = 2.5f * px;
             }
-            spec.LineWeight = 2.5f * px;
+            spec.LineWeight = 2.5f * px * line_scale;
             const std::string label = std::format("{}##{}", s.name, i);
-            ImPlot::PlotLine(label.c_str(), g.scratch_t.data(), g.scratch_v.data(), static_cast<int>(g.scratch_t.size()), spec);
-            for (int k = 0; g.cursor_on && k < 2; ++k)
+            ImPlot::PlotLine(label.c_str(), dt.data(), dv.data(), static_cast<int>(dt.size()), spec);
+            for (int k = 0; g.cursor_on && (png == nullptr || png->cursors) && k < 2; ++k)
             {
                 const double y = s.at_cursor[static_cast<std::size_t>(k)];
                 if (!std::isnan(y))
@@ -777,6 +901,20 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
             }
             ImGui::EndDragDropTarget();
         };
+        if (png != nullptr)
+        {
+            // The export: cursors as plain lines with their tags, nothing to drag.
+            for (int k = 0; g.cursor_on && png->cursors && k < 2; ++k)
+            {
+                const double x = k == 0 ? g.cursor_a : g.cursor_b;
+                ImPlotSpec line;
+                line.LineColor = cursor_color(k);
+                line.LineWeight = 1.5f * px;
+                ImPlot::PlotInfLines(k == 0 ? "##A" : "##B", &x, 1, line);
+                ImPlot::TagX(x, cursor_color(k), "%s %s%s", k == 0 ? "A" : "B", format_duration(x, 3).c_str(), std::abs(x) < 60.0 ? " s" : "");
+            }
+            return;
+        }
         for (int k = 0; k < graph_axes_per_plot; ++k)
         {
             // Only axes set up above: an unused Y2/Y3 has id 0 and asserts in BeginDragDropTargetCustom.
@@ -807,7 +945,7 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
             double& x = k == 0 ? g.cursor_a : g.cursor_b;
             bool held = false;
             ImPlot::DragLineX(k, &x, cursor_color(k), 1.5f, ImPlotDragToolFlags_None, nullptr, nullptr, &held);
-            ImPlot::TagX(x, cursor_color(k), "%s %.3f s", k == 0 ? "A" : "B", x);
+            ImPlot::TagX(x, cursor_color(k), "%s %s%s", k == 0 ? "A" : "B", format_duration(x, 3).c_str(), std::abs(x) < 60.0 ? " s" : "");
             cursor_held |= held;
         }
         for (int k = 0; g.cursor_y_on && row == 0 && k < 2; ++k)
@@ -837,7 +975,7 @@ void draw_plots(App& app, GraphState& g, std::span<const int> slots)
     };
 
     const ImVec2 size = ImGui::GetContentRegionAvail();
-    constexpr ImPlotFlags plot_flags = ImPlotFlags_None;
+    const ImPlotFlags plot_flags = png != nullptr && !png->legend ? ImPlotFlags_NoLegend : ImPlotFlags_None;
     if (rows == 1)
     {
         if (ImPlot::BeginPlot(row_title(0).c_str(), size, plot_flags))
@@ -978,6 +1116,249 @@ void draw_gauge(const GraphSignal& s)
     ImGui::Dummy(ImVec2(w, c.y + r + small * 0.4f + name_size * 1.4f - p.y));
 }
 
+struct PngSize
+{
+    const char* label;
+    int w, h;
+};
+constexpr PngSize png_sizes[] = {{"As on screen", 0, 0},          {"1280 x 720", 1280, 720},  {"1920 x 1080 (Full HD)", 1920, 1080},
+                                 {"2560 x 1440", 2560, 1440},     {"3840 x 2160 (4K)", 3840, 2160}, {"Custom", 0, 0}};
+constexpr const char* png_scales[] = {"Auto", "1x", "1.5x", "2x", "3x"};
+constexpr float png_scale_values[] = {0.0f, 1.0f, 1.5f, 2.0f, 3.0f};
+constexpr int png_max_side = 8192; // within any GL_MAX_TEXTURE_SIZE a desktop GPU has
+
+// The visible signals' names, the export's default title.
+std::string png_auto_title(const GraphState& g)
+{
+    std::string t;
+    for (const GraphSignal& s : g.signals)
+    {
+        if (!s.hidden)
+        {
+            t += (t.empty() ? "" : ", ") + s.name;
+        }
+    }
+    return t.empty() ? std::string("Graph") : t;
+}
+
+void draw_png_dialog(GraphState& g)
+{
+    constexpr const char* popup = "Export Graph as PNG";
+    if (g.png_dialog)
+    {
+        ImGui::OpenPopup(popup);
+        g.png_dialog = false;
+    }
+    if (!ImGui::BeginPopupModal(popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        return;
+    }
+    GraphPngOptions& o = g.png;
+    const float em = ImGui::GetFontSize();
+    ImGui::SeparatorText("Image");
+    ImGui::SetNextItemWidth(em * 14.0f);
+    ImGui::Combo("Size", &o.size, [](void*, int i) { return png_sizes[i].label; }, nullptr, static_cast<int>(std::size(png_sizes)));
+    if (o.size == static_cast<int>(std::size(png_sizes)) - 1)
+    {
+        ImGui::SetNextItemWidth(em * 6.0f);
+        ImGui::InputInt("##w", &o.width, 0);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("x");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(em * 6.0f);
+        ImGui::InputInt("##h", &o.height, 0);
+        o.width = std::clamp(o.width, 64, png_max_side);
+        o.height = std::clamp(o.height, 64, png_max_side);
+    }
+    ImGui::SetNextItemWidth(em * 14.0f);
+    ImGui::Combo("Text and lines", &o.scale, png_scales, static_cast<int>(std::size(png_scales)));
+    ImGui::SetItemTooltip("Auto grows with the height: 1x up to about 900 px, 2.4x at 4K");
+    ImGui::SeparatorText("Style");
+    int style = static_cast<int>(o.style);
+    ImGui::RadioButton("Kraken", &style, 0);
+    ImGui::SetItemTooltip("The app's current theme");
+    ImGui::SameLine();
+    ImGui::RadioButton("Light", &style, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton("Print", &style, 2);
+    ImGui::SetItemTooltip("White, black text, bolder curves");
+    ImGui::SameLine();
+    ImGui::RadioButton("Transparent", &style, 3);
+    ImGui::SetItemTooltip("No background, for slides");
+    o.style = static_cast<GraphPngStyle>(style);
+    ImGui::SeparatorText("Contents");
+    ImGui::SetNextItemWidth(em * 22.0f);
+    ImGui::InputTextWithHint("Title", png_auto_title(g).c_str(), &o.title);
+    ImGui::Checkbox("Time range under the title", &o.subtitle);
+    ImGui::Checkbox("Legend", &o.legend);
+    ImGui::BeginDisabled(!g.cursor_on);
+    ImGui::Checkbox("Cursors and their values", &o.cursors);
+    ImGui::EndDisabled();
+    if (!g.cursor_on)
+    {
+        ImGui::SetItemTooltip("Turn the cursors on in the graph first");
+    }
+    ImGui::Checkbox("Kraken Explorer watermark", &o.watermark);
+    const auto [w, h] = graph_png_size(o, g.view_w, g.view_h);
+    ImGui::TextDisabled("%d x %d px, text and lines %.1fx", w, h, graph_png_scale(o, h));
+    ImGui::Separator();
+    if (ImGui::Button("Save..."))
+    {
+        file_dialog_open(g.export_dialog, FileDialogMode::Save, "Export plot as PNG", g.png_last, {{"PNG image", "*.png"}});
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape))
+    {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// The graph once more, in a window of the export's size that never reaches the screen: main.cpp
+// renders its draw list into a framebuffer (App::PngExport). Same data, axes and cursors as on
+// screen; the style's colours, a title, the scale's font size and line widths.
+void draw_png_export(App& app, GraphState& g)
+{
+    const GraphPngOptions& o = g.png;
+    const auto [w, h] = graph_png_size(o, g.view_w, g.view_h);
+    const float scale = graph_png_scale(o, h);
+    const bool light = o.style == GraphPngStyle::Light || o.style == GraphPngStyle::Print;
+    const bool transparent = o.style == GraphPngStyle::Transparent;
+    const ImVec4 ink = light ? ImVec4(0.09f, 0.14f, 0.16f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    const ImVec4 dim = light ? ImVec4(0.33f, 0.40f, 0.43f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+    const ImVec4 paper = o.style == GraphPngStyle::Print ? ImVec4(1, 1, 1, 1)
+                         : light                         ? ImVec4(0.97f, 0.98f, 0.98f, 1.0f)
+                                                         : ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    // A window's clip rect is cut to its viewport: for this one Begin the main viewport is as big as
+    // the image, so a 4K export from a smaller screen keeps all of it.
+    const ImVec2 screen = vp->Size;
+    vp->Size = ImVec2(std::max(vp->Size.x, static_cast<float>(w)), std::max(vp->Size.y, static_cast<float>(h)));
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(ImVec2(static_cast<float>(w), static_cast<float>(h)));
+    ImGui::SetNextWindowViewport(vp->ID);
+    const float pad = 28.0f * scale;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, ink);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    const float base = ImGui::GetStyle().FontSizeBase * scale;
+    ImGui::PushFont(nullptr, base);
+    ImPlot::PushStyleColor(ImPlotCol_FrameBg, ImVec4(0, 0, 0, 0));
+    if (light || transparent)
+    {
+        ImPlot::PushStyleColor(ImPlotCol_PlotBg, transparent ? ImVec4(0, 0, 0, 0) : ImVec4(1, 1, 1, light ? 0.0f : 1.0f));
+        ImPlot::PushStyleColor(ImPlotCol_AxisGrid, light ? ImVec4(0, 0, 0, 0.10f) : ImPlot::GetStyle().Colors[ImPlotCol_AxisGrid]);
+        ImPlot::PushStyleColor(ImPlotCol_AxisText, ink);
+        ImPlot::PushStyleColor(ImPlotCol_TitleText, ink);
+        ImPlot::PushStyleColor(ImPlotCol_LegendText, ink);
+        ImPlot::PushStyleColor(ImPlotCol_LegendBg, light ? ImVec4(1, 1, 1, 0.85f) : ImVec4(0, 0, 0, 0.35f));
+        ImPlot::PushStyleColor(ImPlotCol_LegendBorder, light ? ImVec4(0, 0, 0, 0.15f) : ImVec4(1, 1, 1, 0.2f));
+        ImPlot::PushStyleColor(ImPlotCol_PlotBorder, light ? ImVec4(0, 0, 0, 0.20f) : ImVec4(1, 1, 1, 0.25f));
+    }
+    const auto scaled = [scale](auto v)
+    {
+        if constexpr (std::is_same_v<decltype(v), ImVec2>)
+        {
+            return ImVec2(v.x * scale, v.y * scale);
+        }
+        else
+        {
+            return v * scale;
+        }
+    };
+    ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, scaled(ImPlot::GetStyle().PlotPadding));
+    ImPlot::PushStyleVar(ImPlotStyleVar_LabelPadding, scaled(ImPlot::GetStyle().LabelPadding));
+    ImPlot::PushStyleVar(ImPlotStyleVar_LegendPadding, scaled(ImPlot::GetStyle().LegendPadding));
+    ImPlot::PushStyleVar(ImPlotStyleVar_LegendInnerPadding, scaled(ImPlot::GetStyle().LegendInnerPadding));
+    ImPlot::PushStyleVar(ImPlotStyleVar_LegendSpacing, scaled(ImPlot::GetStyle().LegendSpacing));
+    ImPlot::PushStyleVar(ImPlotStyleVar_MajorTickLen, scaled(ImPlot::GetStyle().MajorTickLen));
+    ImPlot::PushStyleVar(ImPlotStyleVar_MinorTickLen, scaled(ImPlot::GetStyle().MinorTickLen));
+    ImPlot::PushStyleVar(ImPlotStyleVar_MajorTickSize, scaled(ImPlot::GetStyle().MajorTickSize));
+    ImPlot::PushStyleVar(ImPlotStyleVar_MinorTickSize, scaled(ImPlot::GetStyle().MinorTickSize));
+    ImPlot::PushStyleVar(ImPlotStyleVar_MajorGridSize, scaled(ImPlot::GetStyle().MajorGridSize));
+    ImPlot::PushStyleVar(ImPlotStyleVar_PlotBorderSize, scaled(ImPlot::GetStyle().PlotBorderSize));
+    constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav
+                                       | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing
+                                       | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground;
+    if (ImGui::Begin("##graph_png", nullptr, flags))
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p0 = ImGui::GetWindowPos();
+        const ImVec2 p1(p0.x + static_cast<float>(w), p0.y + static_cast<float>(h));
+        if (!transparent)
+        {
+            dl->AddRectFilled(p0, p1, ImGui::GetColorU32(paper));
+            if (!light) // a deep-sea glow from the bottom, as the app's chrome
+            {
+                const ImU32 glow = ImGui::GetColorU32(ImVec4(0.05f, 0.45f, 0.50f, 0.18f));
+                dl->AddRectFilledMultiColor(ImVec2(p0.x, p1.y - h * 0.45f), p1, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), glow, glow);
+            }
+        }
+        ImGui::PushFont(nullptr, base * 1.7f);
+        ImGui::TextUnformatted(o.title.empty() ? png_auto_title(g).c_str() : o.title.c_str());
+        ImGui::PopFont();
+        if (o.subtitle)
+        {
+            const double span = g.x_max - g.x_min;
+            int shown = 0;
+            for (const GraphSignal& s : g.signals)
+            {
+                shown += s.hidden ? 0 : 1;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, dim);
+            ImGui::Text("%s - %s  (%s%s)  ·  %d signal%s", format_duration(g.x_min, 3).c_str(), format_duration(g.x_max, 3).c_str(),
+                        format_duration(span, 3).c_str(), span < 60.0 ? " s" : "", shown, shown == 1 ? "" : "s");
+            ImGui::PopStyleColor();
+        }
+        ImGui::Dummy(ImVec2(0.0f, 8.0f * scale));
+        const float mark_h = o.watermark ? ImGui::GetTextLineHeightWithSpacing() : 0.0f;
+        if (ImGui::BeginChild("##png_plot", ImVec2(0.0f, -mark_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground))
+        {
+            switch (g.view)
+            {
+            case GraphView::TimeSeries: draw_plots(app, g, graph_slots(g), &o); break;
+            case GraphView::XY: draw_xy(app, g, &o); break;
+            case GraphView::Text: draw_grid(g, draw_text_card); break;
+            case GraphView::Gauge: draw_grid(g, draw_gauge); break;
+            }
+        }
+        ImGui::EndChild();
+        if (o.watermark)
+        {
+            char squid[5] = {};
+            ImTextCharToUtf8(squid, theme_squid_codepoint);
+            const std::string mark = std::string(squid) + " Kraken Explorer";
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(dim.x, dim.y, dim.z, 0.8f));
+            ImGui::SetCursorPosX(static_cast<float>(w) - pad - ImGui::CalcTextSize(mark.c_str()).x);
+            ImGui::TextUnformatted(mark.c_str());
+            ImGui::PopStyleColor();
+        }
+        app.png_export = App::PngExport{.x = p0.x, .y = p0.y, .w = w, .h = h, .transparent = transparent, .path = g.png_path};
+    }
+    const ImGuiWindow* root = ImGui::GetCurrentWindow();
+    ImGui::End();
+    if (app.png_export)
+    {
+        for (ImGuiWindow* win : ImGui::GetCurrentContext()->Windows) // the export window and its children, drawn this frame
+        {
+            if (win->RootWindow == root && win->Active)
+            {
+                app.png_export->lists.push_back(win->DrawList);
+            }
+        }
+    }
+    ImPlot::PopStyleVar(11);
+    ImPlot::PopStyleColor(light || transparent ? 9 : 1);
+    ImGui::PopFont();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+    vp->Size = screen;
+    g.png_path.clear();
+}
+
 void draw_toolbar(App& app, GraphState& g)
 {
     const float px = ImGui::GetFontSize() / 15.0f;
@@ -1039,6 +1420,48 @@ void draw_toolbar(App& app, GraphState& g)
     }
 }
 
+namespace
+{
+
+// File view: the graph keeps to the Log. The Log's top row is a line in the plot; when the Log
+// moves outside the visible window the window follows (same zoom), and a click in the plot puts
+// the Log on that time. ponytail: file view only, the live Log scrolls in pixels.
+void sync_with_log(App& app, const WorkspaceTab& tab, GraphState& g)
+{
+    g.log_t = -1.0;
+    const Trace& t = app.trace;
+    const auto it = app.trace_windows.find(tab.uid);
+    if (t.file.empty() || g.start_ns < 0 || it == app.trace_windows.end())
+    {
+        g.click_t = -1.0;
+        return;
+    }
+    TraceWindowState& s = it->second;
+    const bool filtered = !s.file_filtered.empty();
+    const uint64_t n = filtered ? s.file_filtered.size() : t.file.size();
+    if (g.click_t >= 0.0)
+    {
+        const int64_t ts = g.start_ns + static_cast<int64_t>(g.click_t * 1e9);
+        trace_window_goto(s, t, static_cast<uint64_t>(std::ranges::lower_bound(t.file, ts, {}, &FrameCacheRec::ts_ns) - t.file.begin()), 0);
+        g.click_t = -1.0;
+    }
+    if (n == 0)
+    {
+        return;
+    }
+    const uint64_t top = std::min(s.file_top, n - 1);
+    g.log_t = static_cast<double>(t.file[filtered ? s.file_filtered[top] : top].ts_ns - g.start_ns) * 1e-9;
+    if (g.log_t < g.x_min || g.log_t > g.x_max)
+    {
+        const double half = (g.x_max - g.x_min) * 0.5;
+        g.follow = false;
+        g.x_min = g.log_t - half;
+        g.x_max = g.log_t + half;
+    }
+}
+
+} // namespace
+
 void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
 {
     for (GraphSignal& s : g.signals) // palette colours follow a theme switch (dark ones vanish on light)
@@ -1067,6 +1490,7 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
     {
         draw_toolbar(app, g);
         follow_window(app, g); // every view: the statistics use the window in Text / Gauge too
+        sync_with_log(app, tab, g);
         if (ImGui::BeginChild("##side", ImVec2(280.0f * px, 0.0f), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders))
         {
             ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1133,22 +1557,16 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
             {
                 file_dialog_open(g.export_dialog, FileDialogMode::Save, "Export plot", "graph.csv", {{"CSV files", "*.csv"}});
             }
-            if (ImGui::Button("Export to PNG", ImVec2(-FLT_MIN, 0.0f)))
+            if (ImGui::Button("Export to PNG...", ImVec2(-FLT_MIN, 0.0f)))
             {
-                file_dialog_open(g.export_dialog, FileDialogMode::Save, "Export plot as PNG", "graph.png", {{"PNG image", "*.png"}});
+                g.png_dialog = true;
             }
+            draw_png_dialog(g);
             for (const auto& path : file_dialog_draw(g.export_dialog))
             {
                 if (path.ends_with(".png"))
                 {
-                    // ponytail: the capture reads the main framebuffer, so a graph in its own OS
-                    // window (multi-viewport) cannot be exported; dock it first.
-                    if (ImGui::GetWindowViewport() != ImGui::GetMainViewport())
-                    {
-                        log_error("Graph: Export to PNG needs the graph inside the main window; dock it first");
-                        continue;
-                    }
-                    app.screenshot = App::Screenshot{.path = path, .x = g.view_x, .y = g.view_y, .w = g.view_w, .h = g.view_h};
+                    g.png_path = g.png_last = path; // drawn off screen at the end of this window, rendered by main.cpp
                 }
                 else
                 {
@@ -1160,8 +1578,6 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
         ImGui::SameLine();
         if (ImGui::BeginChild("##view"))
         {
-            g.view_x = ImGui::GetWindowPos().x;
-            g.view_y = ImGui::GetWindowPos().y;
             g.view_w = ImGui::GetWindowSize().x;
             g.view_h = ImGui::GetWindowSize().y;
             // The list may have removed a signal this frame; the slots must match again.
@@ -1180,6 +1596,10 @@ void draw_graph(App& app, const WorkspaceTab& tab, GraphState& g)
             case GraphView::Gauge:
                 draw_grid(g, draw_gauge);
                 break;
+            }
+            if (!g.png_path.empty())
+            {
+                draw_png_export(app, g);
             }
         }
         ImGui::EndChild();
@@ -1287,6 +1707,27 @@ bool load_signal(const Setup& setup, const std::deque<Iface>& ifaces, pugi::xml_
 }
 
 } // namespace
+
+std::pair<int, int> graph_png_size(const GraphPngOptions& o, float screen_w, float screen_h)
+{
+    const int last = static_cast<int>(std::size(png_sizes)) - 1;
+    const int i = std::clamp(o.size, 0, last);
+    if (i == 0)
+    {
+        return {std::clamp(static_cast<int>(screen_w), 64, png_max_side), std::clamp(static_cast<int>(screen_h), 64, png_max_side)};
+    }
+    if (i == last)
+    {
+        return {std::clamp(o.width, 64, png_max_side), std::clamp(o.height, 64, png_max_side)};
+    }
+    return {png_sizes[i].w, png_sizes[i].h};
+}
+
+float graph_png_scale(const GraphPngOptions& o, int h)
+{
+    const int i = std::clamp(o.scale, 0, static_cast<int>(std::size(png_scales)) - 1);
+    return i == 0 ? std::clamp(static_cast<float>(h) / 900.0f, 1.0f, 4.0f) : png_scale_values[i];
+}
 
 double graph_value_at(std::span<const double> t, std::span<const double> v, double time)
 {
@@ -1523,6 +1964,70 @@ void graph_decimate(std::span<const double> t, std::span<const double> v, double
     }
 }
 
+GraphLod graph_lod_build(std::vector<double> t, std::vector<double> v, std::size_t top)
+{
+    GraphLod lod;
+    lod.t.push_back(std::move(t));
+    lod.v.push_back(std::move(v));
+    while (lod.t.back().size() / graph_lod_fan >= top)
+    {
+        const std::vector<double>& pt = lod.t.back();
+        const std::vector<double>& pv = lod.v.back();
+        std::vector<double> nt;
+        std::vector<double> nv;
+        nt.reserve(2 * (pt.size() / graph_lod_fan + 1));
+        nv.reserve(nt.capacity());
+        for (std::size_t i = 0; i < pt.size(); i += graph_lod_fan)
+        {
+            const std::size_t end = std::min(i + graph_lod_fan, pt.size());
+            std::size_t mn = i;
+            std::size_t mx = i;
+            for (std::size_t j = i + 1; j < end; ++j)
+            {
+                mn = pv[j] < pv[mn] ? j : mn;
+                mx = pv[j] > pv[mx] ? j : mx;
+            }
+            for (std::size_t k : {std::min(mn, mx), std::max(mn, mx)}) // always two: buckets = points / 2
+            {
+                nt.push_back(pt[k]);
+                nv.push_back(pv[k]);
+            }
+        }
+        lod.t.push_back(std::move(nt));
+        lod.v.push_back(std::move(nv));
+    }
+    return lod;
+}
+
+std::size_t graph_lod_level(const GraphLod& lod, double x0, double x1, int pixels)
+{
+    const std::size_t need = 4 * static_cast<std::size_t>(std::max(pixels, 1));
+    for (std::size_t level = lod.t.size(); level-- > 1;)
+    {
+        const std::vector<double>& t = lod.t[level];
+        const auto lo = std::lower_bound(t.begin(), t.end(), x0);
+        const auto hi = std::upper_bound(lo, t.end(), x1);
+        if (static_cast<std::size_t>(hi - lo) / 2 >= need)
+        {
+            return level;
+        }
+    }
+    return 0;
+}
+
+void graph_lod_window(const GraphLod& lod, std::size_t level, double x0, double x1, std::vector<double>& out_t,
+                      std::vector<double>& out_v)
+{
+    const std::vector<double>& t = lod.t[level];
+    const std::vector<double>& v = lod.v[level];
+    auto lo = std::lower_bound(t.begin(), t.end(), x0);
+    auto hi = std::upper_bound(lo, t.end(), x1);
+    lo = lo == t.begin() ? lo : lo - 1; // one neighbour each side so the line reaches the edges
+    hi = hi == t.end() ? hi : hi + 1;
+    out_t.assign(lo, hi);
+    out_v.assign(v.begin() + (lo - t.begin()), v.begin() + (hi - t.begin()));
+}
+
 void graph_xy_pair(std::span<const double> x_t, std::span<const double> x_v, std::span<const double> y_t,
                    std::span<const double> y_v, double t0, double t1, std::vector<double>& out_x,
                    std::vector<double>& out_y)
@@ -1548,6 +2053,113 @@ void graph_xy_pair(std::span<const double> x_t, std::span<const double> x_v, std
     }
 }
 
+namespace
+{
+
+// Decodes s over the whole file into a pyramid on its own thread: the frame cache's per-id index
+// gives the message's frames, the mapping stays alive through the shared_ptr, and the DB entries
+// are copied so a DBC reload meanwhile cannot pull them away. The job is dropped (stop + join)
+// with the signal, so the loop checks the stop token.
+std::shared_ptr<GraphLodJob> start_lod_job(const App& app, const GraphSignal& s, int64_t start_ns)
+{
+    const FrameCache& c = *app.trace_file;
+    std::vector<uint32_t> list = frame_cache_message_frames(c, app.setup, s.can_msg);
+    auto job = std::make_shared<GraphLodJob>();
+    job->thread = std::jthread([job = job.get(), keep = app.trace_file, list = std::move(list), msg = *s.can_msg, name = s.name, start_ns,
+                                wake = app.tasks.wake](const std::stop_token& stop)
+    {
+        const CanDbSignal* sig = can_db_find_signal(msg, name);
+        std::vector<double> t;
+        std::vector<double> v;
+        for (std::size_t k = 0; sig != nullptr && k < list.size(); ++k)
+        {
+            if ((k & 0xFFFF) == 0 && stop.stop_requested())
+            {
+                return;
+            }
+            const BusMessage m = frame_cache_frame(*keep, list[k]);
+            if (can_signal_present(msg, *sig, m))
+            {
+                t.push_back(static_cast<double>(m.ts_ns - start_ns) * 1e-9);
+                v.push_back(can_signal_extract_physical(*sig, m));
+            }
+        }
+        job->result = std::make_shared<const GraphLod>(graph_lod_build(std::move(t), std::move(v)));
+        job->done.store(true, std::memory_order_release);
+        if (wake != nullptr)
+        {
+            wake(); // the main loop is event-driven: draw the finished signal now
+        }
+    });
+    return job;
+}
+
+// File view (a loaded file in the trace): every CAN signal gets a pyramid of the whole file
+// (start_lod_job) and shows nothing until it is built; then each window change copies the
+// coarsest level still finer than a quarter pixel into s.t / s.v, which graph_decimate reduces
+// per pixel as in live mode. Redone when the window, the plot width, the signal set or the setup
+// changes. ponytail: statistics and cursor values read that window, so zoomed out they are of
+// the bucket extremes, exact once a level-0 window fits.
+void graph_file_window(GraphState& g, const App& app)
+{
+    if (app.trace_file == nullptr)
+    {
+        return;
+    }
+    const FrameCache& c = *app.trace_file;
+    if (g.start_ns < 0)
+    {
+        g.start_ns = c.recs.front().ts_ns;
+        g.last_t = static_cast<double>(c.recs.back().ts_ns - g.start_ns) * 1e-9;
+        g.last_wall = wall_seconds();
+        g.follow = false; // open on the whole file
+        g.x_min = 0.0;
+        g.x_max = std::max(g.last_t, 1e-3);
+    }
+    bool arrived = false;
+    for (GraphSignal& s : g.signals)
+    {
+        if (s.kind != GraphSignalKind::Can || s.can_msg == nullptr)
+        {
+            continue; // ponytail: LIN and bus load are live-only for now
+        }
+        if (s.lod_file.lock() != app.trace_file || s.lod_generation != app.setup.generation)
+        {
+            s.lod_file = app.trace_file;
+            s.lod_generation = app.setup.generation;
+            s.lod.reset();
+            s.lod_job = start_lod_job(app, s, g.start_ns);
+        }
+        if (s.lod_job != nullptr && s.lod_job->done.load(std::memory_order_acquire))
+        {
+            s.lod = s.lod_job->result;
+            s.lod_job.reset();
+            const std::vector<double>& top = s.lod->v.back(); // holds the extremes of the whole file
+            s.seen_min = top.empty() ? 0.0 : *std::ranges::min_element(top);
+            s.seen_max = top.empty() ? 0.0 : *std::ranges::max_element(top);
+            arrived = true;
+        }
+    }
+    const std::array<double, 5> key{g.x_min, g.x_max, static_cast<double>(g.signals.size()),
+                                    static_cast<double>(app.setup.generation), static_cast<double>(g.plot_px)};
+    if (key == g.file_key && !arrived)
+    {
+        return;
+    }
+    g.file_key = key;
+    for (GraphSignal& s : g.signals)
+    {
+        s.t.clear();
+        s.v.clear();
+        if (s.lod != nullptr)
+        {
+            graph_lod_window(*s.lod, graph_lod_level(*s.lod, g.x_min, g.x_max, g.plot_px), g.x_min, g.x_max, s.t, s.v);
+        }
+    }
+}
+
+} // namespace
+
 void graph_ingest(GraphState& g, const App& app)
 {
     const Trace& tr = app.trace;
@@ -1560,6 +2172,12 @@ void graph_ingest(GraphState& g, const App& app)
     {
         g.setup_generation = app.setup.generation;
         resolve_signals(g, app.setup);
+    }
+    if (!tr.file.empty())
+    {
+        graph_file_window(g, app);
+        g.next_index = tr.end;
+        return;
     }
     if (g.signals.empty())
     {
@@ -1716,4 +2334,22 @@ void draw_graph_windows(App& app, WorkspaceTab* current)
     }
     draw_find_signal(app, *current, main);
     std::erase_if(current->graphs, [](const GraphState& g) { return !g.open; });
+}
+
+void graph_show_range(GraphState& g, const Setup& setup, const SignalEntry& e, int64_t t0_ns, int64_t t1_ns)
+{
+    add_search_hit(g, setup, e);
+    if (g.start_ns < 0)
+    {
+        return; // no time base yet: nothing ingested
+    }
+    const double a = static_cast<double>(t0_ns - g.start_ns) * 1e-9;
+    const double b = static_cast<double>(t1_ns - g.start_ns) * 1e-9;
+    const double pad = std::max((b - a) * 0.25, 0.5);
+    g.follow = false;
+    g.x_min = a - pad;
+    g.x_max = b + pad;
+    g.cursor_on = true;
+    g.cursor_a = a;
+    g.cursor_b = b;
 }

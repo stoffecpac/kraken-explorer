@@ -509,6 +509,27 @@ TEST_CASE("vim keys in Available Messages: j selects, Enter adds the DBC message
     CHECK(gen.rows[0].msg.id == (first.raw_id & can_id_mask_extended));
 }
 
+// A DBC in a network without interfaces (a log analysed offline): its messages are still listed,
+// so they can be added and edited in Message View.
+TEST_CASE("Available Messages lists every DBC when no network uses the interface")
+{
+    const UiTest ui({1600, 900});
+    App app;
+    auto db = std::make_shared<CanDb>();
+    REQUIRE(dbc_parse_file(DEMO_DBC, *db));
+    SetupNetwork net;
+    net.can_dbs.push_back(db);
+    app.setup.networks.push_back(std::move(net));
+    const WorkspaceTab tab{.uid = 8};
+    TxGenerator gen;
+    ui_frame(app, tab, gen);
+    ui_frame(app, tab, gen, "/##available_");
+    type(app, tab, gen, 'j');
+    REQUIRE(gen.layout_msg == &db->messages.begin()->second);
+    press(app, tab, gen, ImGuiKey_Enter);
+    CHECK(gen.rows.size() == 1);
+}
+
 // T87b a2 F1: the DBC keeps bit 31 on extended ids (0x98FEEE00); the list shows and searches 0x18FEEE00.
 TEST_CASE("Available Messages lists and finds extended ids without the DBC's bit 31")
 {

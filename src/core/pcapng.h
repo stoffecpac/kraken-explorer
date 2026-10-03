@@ -32,6 +32,7 @@
 #include <bit>
 #include <concepts>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 #include <vector>
 
@@ -46,9 +47,19 @@ void append_le(std::vector<uint8_t>& out, T value)
     using U = std::make_unsigned_t<std::conditional_t<std::floating_point<T>,
                                                       std::conditional_t<sizeof(T) == 8, int64_t, int32_t>, T>>;
     const auto bits = std::bit_cast<U>(value);
-    for (size_t i = 0; i < sizeof(U); ++i)
+    if constexpr (std::endian::native == std::endian::little)
     {
-        out.push_back(static_cast<uint8_t>(bits >> (8 * i)));
+        // One resize + memcpy: a push_back per byte was a third of a 3 GB MF4 / BLF export.
+        const std::size_t at = out.size();
+        out.resize(at + sizeof(U));
+        std::memcpy(out.data() + at, &bits, sizeof(U));
+    }
+    else
+    {
+        for (size_t i = 0; i < sizeof(U); ++i)
+        {
+            out.push_back(static_cast<uint8_t>(bits >> (8 * i)));
+        }
     }
 }
 

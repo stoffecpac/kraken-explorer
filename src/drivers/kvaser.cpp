@@ -29,12 +29,61 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "core/log.h"
 #include "drivers/driver.h"
 
-#include <canlib.h>
+#include <dlfcn.h>
+
+#include "drivers/kvaser_canlib.h"
+
+const Canlib* canlib_load()
+{
+    static const Canlib* lib = []() -> const Canlib*
+    {
+        void* so = dlopen("libcanlib.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (so == nullptr)
+        {
+            so = dlopen("libcanlib.so", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (so == nullptr)
+        {
+            log_info("Kvaser: libcanlib not installed, native Kvaser channels unavailable (USB devices still work through SocketCAN's kvaser_usb)");
+            return nullptr;
+        }
+        static Canlib t;
+        bool ok = true;
+        const auto load = [&](auto& fn, const char* name)
+        {
+            fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(dlsym(so, name));
+            ok = ok && fn != nullptr;
+        };
+        load(t.canInitializeLibrary, "canInitializeLibrary");
+        load(t.canGetNumberOfChannels, "canGetNumberOfChannels");
+        load(t.canGetChannelData, "canGetChannelData");
+        load(t.canOpenChannel, "canOpenChannel");
+        load(t.canSetBusParams, "canSetBusParams");
+        load(t.canSetBusParamsFd, "canSetBusParamsFd");
+        load(t.canSetBusOutputControl, "canSetBusOutputControl");
+        load(t.canBusOn, "canBusOn");
+        load(t.canBusOff, "canBusOff");
+        load(t.canClose, "canClose");
+        load(t.canWrite, "canWrite");
+        load(t.canReadWait, "canReadWait");
+        load(t.canRequestChipStatus, "canRequestChipStatus");
+        load(t.canReadStatus, "canReadStatus");
+        if (!ok)
+        {
+            log_error("Kvaser: libcanlib is missing a function this build needs (an old linuxcan?)");
+            return nullptr;
+        }
+        t.canInitializeLibrary();
+        return &t;
+    }();
+    return lib;
+}
 
 namespace
 {
@@ -46,6 +95,7 @@ struct Kvaser
 {
     canHandle handle = -1;
     int64_t open_ns = 0;   // host time at canBusOn, base for device timestamps
+    bool fd = false;
 
     std::mutex tx_mutex;
     std::deque<BusMessage> tx_done;   // sent frames, reported by read()
@@ -56,36 +106,40 @@ struct Kvaser
     std::atomic<uint64_t> tx_errors{0};
 };
 
-std::string kvaser_channel_name(int ch)
+std::string kvaser_channel_name(const Canlib& cl, int ch)
 {
     char dev[256] = {};
-    canGetChannelData(ch, canCHANNELDATA_DEVDESCR_ASCII, dev, sizeof(dev));
+    cl.canGetChannelData(ch, canCHANNELDATA_DEVDESCR_ASCII, dev, sizeof(dev));
     return std::format("{} (ch{})", dev, ch);
 }
 
 void kvaser_enumerate(std::vector<IfaceInfo>& out)
 {
-    static std::once_flag init;
-    std::call_once(init, [] { canInitializeLibrary(); });
-
-    int channels = 0;
-    if (const canStatus st = canGetNumberOfChannels(&channels); st != canOK)
+    const Canlib* cl = canlib_load();
+    if (cl == nullptr)
     {
-        log_error(std::format("Kvaser: canGetNumberOfChannels failed: {}", static_cast<int>(st)));
+        return;
+    }
+    int channels = 0;
+    if (const canStatus st = cl->canGetNumberOfChannels(&channels); st != canOK)
+    {
+        log_error(std::format("Kvaser: canGetNumberOfChannels failed: {}", st));
         return;
     }
     std::vector<CanTiming> bitrates;
-    for (unsigned br : {10000u, 20000u, 50000u, 83333u, 100000u, 125000u, 250000u, 500000u, 800000u, 1000000u})
+    for (unsigned br : {10000u, 50000u, 62500u, 83333u, 100000u, 125000u, 250000u, 500000u, 1000000u})
     {
-        bitrates.push_back({.bitrate = br});
+        bitrates.push_back({.bitrate = br, .bitrate_fd = 2000000});
     }
     for (int ch = 0; ch < channels; ++ch)
     {
+        unsigned caps = 0;
+        cl->canGetChannelData(ch, canCHANNELDATA_CHANNEL_CAP, &caps, sizeof caps);
         out.push_back({
-            .name = kvaser_channel_name(ch),
+            .name = kvaser_channel_name(*cl, ch),
             .details = std::format("Kvaser channel {}", ch),
             .version = "",
-            .capabilities = iface_cap::listen_only,
+            .capabilities = iface_cap::listen_only | ((caps & canCHANNEL_CAP_CAN_FD) != 0 ? iface_cap::canfd : 0u),
             .bitrates = bitrates,
         });
     }
@@ -113,13 +167,36 @@ long kvaser_bitrate(unsigned bitrate)
     }
 }
 
+// The data phase bitrate as CANlib's predefined constants (80 % sample point).
+long kvaser_fd_bitrate(unsigned bitrate)
+{
+    switch (bitrate)
+    {
+    case 500000:  return canFD_BITRATE_500K_80P;
+    case 1000000: return canFD_BITRATE_1M_80P;
+    case 4000000: return canFD_BITRATE_4M_80P;
+    case 8000000: return canFD_BITRATE_8M_80P;
+    default:
+        if (bitrate != 2000000)
+        {
+            log_warning(std::format("Kvaser: FD bitrate {} not supported, using 2000000", bitrate));
+        }
+        return canFD_BITRATE_2M_80P;
+    }
+}
+
 bool kvaser_open(Iface& iface, const IfaceConfig& config)
 {
+    const Canlib* cl = canlib_load();
+    if (cl == nullptr)
+    {
+        return false;
+    }
     const std::string& name = iface.info.name;
     int channels = 0;
-    canGetNumberOfChannels(&channels);
+    cl->canGetNumberOfChannels(&channels);
     int ch = 0;
-    while (ch < channels && kvaser_channel_name(ch) != name)
+    while (ch < channels && kvaser_channel_name(*cl, ch) != name)
     {
         ++ch;
     }
@@ -129,63 +206,81 @@ bool kvaser_open(Iface& iface, const IfaceConfig& config)
         return false;
     }
 
-    const canHandle h = canOpenChannel(ch, canOPEN_ACCEPT_VIRTUAL);
+    const bool fd = config.can_fd && (iface.info.capabilities & iface_cap::canfd) != 0;
+    const canHandle h = cl->canOpenChannel(ch, canOPEN_ACCEPT_VIRTUAL | (fd ? canOPEN_CAN_FD : 0));
     if (h < 0)
     {
-        log_error(std::format("Kvaser {}: canOpenChannel failed: {}", name, static_cast<int>(h)));
+        log_error(std::format("Kvaser {}: canOpenChannel failed: {}", name, h));
         return false;
     }
     if (config.configure)
     {
-        if (const canStatus st = canSetBusParams(h, kvaser_bitrate(config.bitrate), 0, 0, 0, 0, 0); st != canOK)
+        if (const canStatus st = cl->canSetBusParams(h, kvaser_bitrate(config.bitrate), 0, 0, 0, 0, 0); st != canOK)
         {
-            log_error(std::format("Kvaser {}: canSetBusParams failed: {}", name, static_cast<int>(st)));
-            canClose(h);
+            log_error(std::format("Kvaser {}: canSetBusParams failed: {}", name, st));
+            cl->canClose(h);
             return false;
         }
-        canSetBusOutputControl(h, config.listen_only ? canDRIVER_SILENT : canDRIVER_NORMAL);
+        if (fd)
+        {
+            if (const canStatus st = cl->canSetBusParamsFd(h, kvaser_fd_bitrate(config.fd_bitrate), 0, 0, 0); st != canOK)
+            {
+                log_error(std::format("Kvaser {}: canSetBusParamsFd failed: {}", name, st));
+                cl->canClose(h);
+                return false;
+            }
+        }
+        cl->canSetBusOutputControl(h, config.listen_only ? canDRIVER_SILENT : canDRIVER_NORMAL);
     }
-    if (const canStatus st = canBusOn(h); st != canOK)
+    if (const canStatus st = cl->canBusOn(h); st != canOK)
     {
-        log_error(std::format("Kvaser {}: canBusOn failed: {}", name, static_cast<int>(st)));
-        canClose(h);
+        log_error(std::format("Kvaser {}: canBusOn failed: {}", name, st));
+        cl->canClose(h);
         return false;
     }
 
     auto k = std::make_unique<Kvaser>();
     k->handle = h;
     k->open_ns = now_ns();
+    k->fd = fd;
     iface_set_impl(iface, std::move(k));
     return true;
 }
 
 void kvaser_close(Iface& iface)
 {
-    if (auto* k = static_cast<Kvaser*>(iface.impl.get()); k && k->handle >= 0)
+    const Canlib* cl = canlib_load();
+    if (auto* k = static_cast<Kvaser*>(iface.impl.get()); cl != nullptr && k != nullptr && k->handle >= 0)
     {
-        canBusOff(k->handle);
-        canClose(k->handle);
+        cl->canBusOff(k->handle);
+        cl->canClose(k->handle);
         k->handle = -1;
     }
 }
 
 bool kvaser_send(Iface& iface, const BusMessage& msg)
 {
+    const Canlib& cl = *canlib_load();
     auto& k = iface_impl<Kvaser>(iface);
     unsigned flags = has_flag(msg, bus_flag::extended) ? canMSG_EXT : canMSG_STD;
     if (has_flag(msg, bus_flag::rtr))
     {
         flags |= canMSG_RTR;
     }
-    const unsigned dlc = std::min<unsigned>(msg.len, 8);
-    uint8_t data[8] = {};
+    const bool fd = k.fd && has_flag(msg, bus_flag::fd);
+    if (fd)
+    {
+        flags |= canFDMSG_FDF | (has_flag(msg, bus_flag::brs) ? canFDMSG_BRS : 0);
+    }
+    const unsigned len = std::min<unsigned>(msg.len, fd ? 64 : 8);
+    uint8_t data[64] = {};
     if (!has_flag(msg, bus_flag::rtr))
     {
-        std::copy_n(msg.data.begin(), dlc, data);
+        std::copy_n(msg.data.begin(), len, data);
     }
-    if (const canStatus st = canWrite(k.handle, static_cast<long>(can_id(msg)), data, dlc, flags); st != canOK)
+    if (const canStatus st = cl.canWrite(k.handle, static_cast<long>(can_id(msg)), data, len, flags); st != canOK)
     {
-        log_error(std::format("Kvaser {}: canWrite failed: {}", iface.info.name, static_cast<int>(st)));
+        log_error(std::format("Kvaser {}: canWrite failed: {}", iface.info.name, st));
         ++k.tx_errors;
         return false;
     }
@@ -201,6 +296,7 @@ bool kvaser_send(Iface& iface, const BusMessage& msg)
 
 int kvaser_read(Iface& iface, BusMessage* out, int max, int timeout_ms)
 {
+    const Canlib& cl = *canlib_load();
     auto& k = iface_impl<Kvaser>(iface);
     int n = 0;
     {
@@ -216,11 +312,11 @@ int kvaser_read(Iface& iface, BusMessage* out, int max, int timeout_ms)
     while (n < max)
     {
         long id = 0;
-        uint8_t data[8] = {};
+        uint8_t data[64] = {};
         unsigned dlc = 0;
         unsigned flags = 0;
         unsigned long ts = 0;
-        const canStatus st = canReadWait(k.handle, &id, data, &dlc, &flags, &ts, wait);
+        const canStatus st = cl.canReadWait(k.handle, &id, data, &dlc, &flags, &ts, wait);
         wait = 0;
         if (st == canERR_NOMSG || st == canERR_TIMEOUT)
         {
@@ -228,7 +324,7 @@ int kvaser_read(Iface& iface, BusMessage* out, int max, int timeout_ms)
         }
         if (st != canOK)
         {
-            log_error(std::format("Kvaser {}: canReadWait failed: {}", iface.info.name, static_cast<int>(st)));
+            log_error(std::format("Kvaser {}: canReadWait failed: {}", iface.info.name, st));
             return n > 0 ? n : -1;
         }
         if (flags & canMSG_ERROR_FRAME)
@@ -246,8 +342,13 @@ int kvaser_read(Iface& iface, BusMessage* out, int max, int timeout_ms)
         {
             m.flags |= bus_flag::rtr;
         }
+        const bool fd = (flags & canFDMSG_FDF) != 0;
+        if (fd)
+        {
+            m.flags |= bus_flag::fd | ((flags & canFDMSG_BRS) != 0 ? bus_flag::brs : 0);
+        }
         m.ts_ns = k.open_ns + static_cast<int64_t>(ts) * kvaser_tick_ns;
-        set_length(m, static_cast<int>(std::min(dlc, 8u)));
+        set_length(m, static_cast<int>(std::min(dlc, fd ? 64u : 8u))); // CANlib reports FD lengths in bytes
         std::copy_n(data, m.len, m.data.begin());
         ++k.rx_frames;
     }
@@ -256,6 +357,7 @@ int kvaser_read(Iface& iface, BusMessage* out, int max, int timeout_ms)
 
 void kvaser_stats(Iface& iface, IfaceStats& out)
 {
+    const Canlib& cl = *canlib_load();
     auto& k = iface_impl<Kvaser>(iface);
     out = {
         .state = IfaceState::Ok,
@@ -265,8 +367,8 @@ void kvaser_stats(Iface& iface, IfaceStats& out)
         .tx_errors = k.tx_errors,
     };
     unsigned long flags = 0;
-    canRequestChipStatus(k.handle);
-    canReadStatus(k.handle, &flags);
+    cl.canRequestChipStatus(k.handle);
+    cl.canReadStatus(k.handle, &flags);
     if (flags & canSTAT_BUS_OFF)
     {
         out.state = IfaceState::BusOff;

@@ -23,6 +23,9 @@ enum class Icon
     GoUp,
     GoHome,
     Record,
+    Replay,
+    Database,
+    Convert,
     Count
 };
 

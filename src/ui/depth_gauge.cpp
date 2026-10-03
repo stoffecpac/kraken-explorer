@@ -1,28 +1,35 @@
+/*
+  Copyright (c) 2026 Schildkroet
+
+  This file is part of Kraken Explorer.
+
+  Kraken Explorer is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 2 of the License, or
+  (at your option) any later version.
+
+  Kraken Explorer is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with Kraken Explorer.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
 #include "ui/depth_gauge.h"
 
 #include <algorithm>
 #include <cmath>
 #include <format>
-#include <numbers>
 #include <string>
 
-#include "core/stats.h"
 
 namespace
 {
 
-struct Landmark
-{
-    float depth;
-    const char* label;
-};
-
-// Labelled on the sounder strip; the zone edges are ticks only (the last one is the strip's
-// right border, under the Challenger Deep landmark line).
-constexpr Landmark landmarks[] = {{3800.0f, "Titanic"}, {6000.0f, "Hadal"}, {challenger_deep_m, "Challenger Deep"}};
-constexpr float zone_edges[] = {200.0f, 1000.0f, 4000.0f, 6000.0f, challenger_deep_m};
-
-// Sunlit teal -> hadal navy, blended by depth fraction.
+// Water colour from the surface (0) to the deep (1).
 ImU32 water(float t)
 {
     const ImVec4 top{0.10f, 0.83f, 0.77f, 1.0f}; // #19D3C5
@@ -31,44 +38,57 @@ ImU32 water(float t)
         {top.x + (deep.x - top.x) * t, top.y + (deep.y - top.y) * t, top.z + (deep.z - top.z) * t, 1.0f});
 }
 
-// 4213 -> "4 213"
-std::string group_thousands(int v)
+// A kraken tentacle along the strip, behind the water: a thick base at the left tapering to a tip
+// that curls up and sways, two rows of suckers with white rims on the underside, a dark edge.
+void draw_tentacle(ImDrawList* dl, ImVec2 a, ImVec2 b, bool sweeping)
 {
-    std::string s = std::to_string(v);
-    for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3)
+    constexpr int segments = 64;
+    const float height = b.y - a.y;
+    const float phase = sweeping ? static_cast<float>(ImGui::GetTime()) * 1.4f : 0.0f;
+    // Dark, muscular limb with pale suckers: it has to read through the water fill.
+    const ImU32 skin = IM_COL32(28, 62, 70, 215);
+    const ImU32 sucker = IM_COL32(60, 150, 150, 230);
+    const ImU32 rim = IM_COL32(240, 250, 248, 200);
+    const ImU32 edge = IM_COL32(6, 20, 26, 230);
+    const auto centre = [&](float t)
     {
-        s.insert(static_cast<std::size_t>(i), " ");
-    }
-    return s;
-}
-
-// Round echo-sounder dial: brass bezel, ping rings, sweep (rotating while sweeping), needle on a
-// 270 degree scale.
-void draw_dial(ImDrawList* dl, ImVec2 c, float r, float fraction, bool sweeping)
-{
-    constexpr float pi = std::numbers::pi_v<float>;
-    const ImU32 accent = ImGui::GetColorU32(ImGuiCol_CheckMark);
-    dial_face(dl, c, r);
-    for (int i = 1; i <= 3; ++i)
+        const float sway = std::sin(t * 7.0f - phase) * (0.06f + 0.22f * t); // the tip swings most
+        const float curl = -0.55f * t * t * t * t;                           // the tip curls up
+        return ImVec2(a.x + (b.x - a.x) * t, a.y + height * (0.62f + sway + curl));
+    };
+    const auto half = [&](float t) { return height * 0.42f * std::pow(1.0f - t, 0.6f) + 1.0f; };
+    dl->PushClipRect(a, b, true);
+    for (int i = 0; i <= segments; ++i)
     {
-        dl->AddCircle(c, r * static_cast<float>(i) / 4.0f, ImGui::GetColorU32(ImGuiCol_CheckMark, 0.25f), 48);
+        const float t = static_cast<float>(i) / segments;
+        dl->PathLineTo({centre(t).x, centre(t).y - half(t)});
     }
-    // Sweep: a fading wedge trailing the beam; parked at 12 o'clock when idle, so an idle frame
-    // looks like the last one and nothing needs a redraw.
-    const float beam = sweeping ? static_cast<float>(std::fmod(ImGui::GetTime() * 1.5, 2.0 * std::numbers::pi))
-                                : -0.5f * pi;
-    for (int i = 0; i < 12; ++i)
+    for (int i = segments; i >= 0; --i)
     {
-        const float a0 = beam - static_cast<float>(i + 1) * 0.07f;
-        dl->PathLineTo(c);
-        dl->PathArcTo(c, r - 1.0f, a0, a0 + 0.07f, 3);
-        dl->PathFillConvex(ImGui::GetColorU32(ImGuiCol_CheckMark, 0.30f * (1.0f - static_cast<float>(i) / 12.0f)));
+        const float t = static_cast<float>(i) / segments;
+        dl->PathLineTo({centre(t).x, centre(t).y + half(t)});
     }
-    dial_ticks(dl, c, r, 0.95f); // scale 0..100 %
-    const float a = dial_start + dial_span * fraction;
-    dl->AddLine(c, {c.x + std::cos(a) * r * 0.85f, c.y + std::sin(a) * r * 0.85f}, accent, 3.0f);
-    dl->AddCircleFilled(c, r * 0.08f, dial_brass);
-    dial_bezel(dl, c, r, std::max(3.0f, r * 0.09f));
+    dl->PathFillConcave(skin);
+    for (const float side : {-1.0f, 1.0f}) // the two edges, darker: the limb reads as a body
+    {
+        for (int i = 0; i <= segments; ++i)
+        {
+            const float t = static_cast<float>(i) / segments;
+            dl->PathLineTo({centre(t).x, centre(t).y + side * half(t)});
+        }
+        dl->PathStroke(edge, 0, 2.5f);
+    }
+    for (int i = 2; i < segments * 9 / 10; i += 3) // suckers in two staggered rows along the underside
+    {
+        const float t = static_cast<float>(i) / segments;
+        const float row = (i / 3) % 2 == 0 ? 0.55f : 0.15f;
+        const ImVec2 c{centre(t).x, centre(t).y + half(t) * row};
+        const float r = half(t) * (row > 0.5f ? 0.42f : 0.30f);
+        dl->AddCircleFilled(c, r, sucker);
+        dl->AddCircle(c, r, rim, 0, std::max(1.5f, r * 0.35f));
+        dl->AddCircleFilled(c, r * 0.35f, edge); // the cup
+    }
+    dl->PopClipRect();
 }
 
 } // namespace
@@ -93,22 +113,6 @@ void dial_ticks(ImDrawList* dl, ImVec2 c, float r, float outer)
     }
 }
 
-void dial_bezel(ImDrawList* dl, ImVec2 c, float r, float thickness)
-{
-    // Porthole: brass ring with a shadowed inner edge and eight bolts.
-    constexpr ImU32 shadow = IM_COL32(0x7a, 0x56, 0x1e, 255);
-    dl->AddCircle(c, r, dial_brass, 48, thickness);
-    dl->AddCircle(c, r - thickness * 0.5f, shadow, 48, std::max(1.0f, thickness * 0.25f));
-    if (thickness >= 4.0f) // bolts are noise on a small dial
-    {
-        for (int i = 0; i < 8; ++i)
-        {
-            const float a = (static_cast<float>(i) + 0.5f) * std::numbers::pi_v<float> / 4.0f;
-            dl->AddCircleFilled({c.x + std::cos(a) * r, c.y + std::sin(a) * r}, thickness * 0.28f, shadow, 8);
-        }
-    }
-}
-
 void dial_needle(ImDrawList* dl, ImVec2 c, float r, float angle, ImU32 col)
 {
     const ImVec2 dir{std::cos(angle), std::sin(angle)};
@@ -118,126 +122,91 @@ void dial_needle(ImDrawList* dl, ImVec2 c, float r, float angle, ImU32 col)
     dl->AddLine(c, {c.x - dir.x * r * 0.18f, c.y - dir.y * r * 0.18f}, col, hw * 2.0f); // counterweight
 }
 
-float depth_m(float fraction)
-{
-    return std::clamp(fraction, 0.0f, 1.0f) * challenger_deep_m;
-}
-
-const char* depth_zone(float depth)
-{
-    if (depth < 200.0f)
-    {
-        return "Epipelagic";
-    }
-    if (depth < 1000.0f)
-    {
-        return "Mesopelagic";
-    }
-    if (depth < 4000.0f)
-    {
-        return "Bathypelagic";
-    }
-    if (depth < 6000.0f)
-    {
-        return "Abyssopelagic";
-    }
-    return "Hadal";
-}
-
 float depth_gauge_min_height()
 {
-    return ImGui::GetFontSize() * 6.4f;
+    return ImGui::GetFontSize() * 2.8f;
 }
 
-void draw_depth_gauge(float fraction, ImVec2 size, const Stats* gaps, bool sweeping)
+void draw_depth_gauge(float fill_from, float fill_to, ImVec2 size, bool sweeping, float* mark_a, float* mark_b)
 {
-    fraction = std::clamp(fraction, 0.0f, 1.0f);
-    const float fs = ImGui::GetFontSize();
+    fill_from = std::clamp(fill_from, 0.0f, 1.0f);
+    fill_to = std::clamp(fill_to, fill_from, 1.0f);
     if (size.x <= 0.0f)
     {
         size.x = std::max(ImGui::GetContentRegionAvail().x + size.x, 4.0f);
     }
-    size.y = std::max(size.y, depth_gauge_min_height()); // legible text needs the room
+    size.y = std::max(size.y, depth_gauge_min_height());
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1{p0.x + size.x, p0.y + size.y};
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGui::InvisibleButton("##strip", size); // the item: tooltips, and the marker drag below
+
+    // Markers: on press the nearest one within a thumb's width takes the drag until release.
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    const ImGuiID drag_id = ImGui::GetID("##strip_drag");
+    if (mark_a != nullptr && mark_b != nullptr)
+    {
+        const float mouse = (ImGui::GetIO().MousePos.x - p0.x) / size.x;
+        if (ImGui::IsItemActivated())
+        {
+            const float da = std::abs(mouse - *mark_a) * size.x;
+            const float db = std::abs(mouse - *mark_b) * size.x;
+            const float reach = ImGui::GetFontSize();
+            store->SetInt(drag_id, std::min(da, db) > reach ? 0 : da <= db ? 1 : 2);
+        }
+        const int which = ImGui::IsItemActive() ? store->GetInt(drag_id, 0) : 0;
+        if (which == 1)
+        {
+            *mark_a = std::clamp(mouse, 0.0f, *mark_b);
+        }
+        else if (which == 2)
+        {
+            *mark_b = std::clamp(mouse, *mark_a, 1.0f);
+        }
+    }
+
+    // The sea: dusk at the surface fading to the deep, the played part lit from the left in the
+    // theme's bioluminescent teal, bubbles rising while something moves, the tentacle through it.
+    const ImU32 surface = IM_COL32(16, 64, 74, 255);
+    const ImU32 deep = IM_COL32(4, 14, 20, 255);
+    dl->AddRectFilledMultiColor(p0, p1, surface, surface, deep, deep);
+    if (fill_to > fill_from)
+    {
+        const ImVec2 f0{p0.x + size.x * fill_from, p0.y};
+        const ImVec2 f1{p0.x + size.x * fill_to, p1.y};
+        dl->AddRectFilledMultiColor(f0, f1, water(fill_from), water(fill_to), water(fill_to), water(fill_from));
+        dl->AddRectFilledMultiColor(f0, f1, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0), deep & 0x00FFFFFF | 0x80000000u,
+                                    deep & 0x00FFFFFF | 0x80000000u); // darker towards the bottom, as water is
+    }
+    draw_tentacle(dl, p0, p1, sweeping);
+    const double now = sweeping ? ImGui::GetTime() : 0.0;
+    for (int i = 0; i < 14; ++i) // bubbles: fixed columns, rising on a loop
+    {
+        const float u = static_cast<float>((i * 37 + 11) % 100) / 100.0f;
+        const float rise = static_cast<float>(std::fmod(now * (0.08 + 0.04 * (i % 3)) + i * 0.17, 1.0));
+        const float r = 1.0f + static_cast<float>(i % 3);
+        const ImVec2 c{p0.x + size.x * u, p1.y - size.y * rise};
+        dl->AddCircle(c, r, IM_COL32(160, 230, 225, 70), 8, 1.0f);
+    }
+    dl->AddRect(p0, p1, ImGui::GetColorU32(ImGuiCol_Border), 3.0f);
     const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
-    const ImU32 dim = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-
-    const float r = size.y * 0.5f - 2.0f;
-    draw_dial(dl, {p0.x + r + 2.0f, p0.y + size.y * 0.5f}, r, fraction, sweeping);
-
-    // Readout: big depth, then zone / fathoms / percent at normal size.
-    const float depth = depth_m(fraction);
-    const float x = p0.x + 2.0f * r + fs;
-    const float right = p0.x + size.x;
-    const std::string big = std::format("{} m", group_thousands(static_cast<int>(depth + 0.5f)));
-    const float big_fs = fs * 2.2f;
-    ImFont* font = ImGui::GetFont();
-    dl->AddText(font, big_fs, {x, p0.y}, text, big.c_str());
-    const std::string pct = std::format("{:.0f} %", fraction * 100.0f);
-    const float pct_w = font->CalcTextSizeA(big_fs, FLT_MAX, 0.0f, pct.c_str()).x;
-    if (right - pct_w > x + font->CalcTextSizeA(big_fs, FLT_MAX, 0.0f, big.c_str()).x + fs)
+    if (mark_a != nullptr && mark_b != nullptr)
     {
-        dl->AddText(font, big_fs, {right - pct_w, p0.y}, ImGui::GetColorU32(ImGuiCol_CheckMark), pct.c_str());
-    }
-    const std::string sub = std::format("{}  ·  {} fathoms", depth_zone(depth),
-                                        group_thousands(static_cast<int>(depth / 1.8288f + 0.5f)));
-    dl->AddText({x, p0.y + big_fs + 1.0f}, dim, sub.c_str());
-
-    // Sounder strip: water gradient down to the current depth, landmark ticks, diver marker.
-    const float sy0 = p0.y + big_fs + fs + 6.0f;
-    const float sy1 = p0.y + size.y - fs - 2.0f;
-    const float w = std::max(right - x, 4.0f);
-    const float x_at = w / challenger_deep_m;
-    const float fill_x = x + w * fraction;
-    dl->AddRectFilled({x, sy0}, {right, sy1}, ImGui::GetColorU32(ImGuiCol_FrameBg), 3.0f);
-    float prev = 0.0f;
-    for (const float edge : zone_edges)
-    {
-        const float a = x + prev * x_at;
-        const float b = std::min(x + edge * x_at, fill_x);
-        if (a < fill_x)
+        const float h = size.y * 0.32f; // brass marker buoys, as the dials' bezels
+        for (const auto [m, label] : {std::pair{*mark_a, "A"}, std::pair{*mark_b, "B"}})
         {
-            const ImU32 ca = water(prev / challenger_deep_m);
-            const ImU32 cb = water(edge / challenger_deep_m);
-            dl->AddRectFilledMultiColor({a, sy0}, {b, sy1}, ca, cb, cb, ca);
-        }
-        prev = edge;
-    }
-    dl->AddRect({x, sy0}, {right, sy1}, ImGui::GetColorU32(ImGuiCol_Border), 3.0f);
-    for (const float edge : zone_edges)
-    {
-        const float tx = x + edge * x_at;
-        dl->AddLine({tx, sy1 - (sy1 - sy0) * 0.4f}, {tx, sy1}, dim);
-    }
-    float label_end = x; // skip a landmark label that would overlap the previous one
-    for (const Landmark& m : landmarks)
-    {
-        const float tx = x + m.depth * x_at;
-        const std::string label = std::format("{} {} m", m.label, group_thousands(static_cast<int>(m.depth)));
-        const float lw = ImGui::CalcTextSize(label.c_str()).x;
-        const float lx = std::clamp(tx - lw * 0.5f, label_end, right - lw);
-        dl->AddLine({tx, sy0}, {tx, sy1 + 3.0f}, dial_brass);
-        if (lx >= label_end)
-        {
-            dl->AddText({lx, sy1 + 2.0f}, dim, label.c_str());
-            label_end = lx + lw + fs * 0.5f;
+            const float x = p0.x + size.x * m;
+            dl->AddLine({x, p0.y}, {x, p1.y}, dial_brass, 1.5f);
+            dl->AddTriangleFilled({x - h * 0.6f, p0.y}, {x + h * 0.6f, p0.y}, {x, p0.y + h}, dial_brass);
+            const float lx = std::min(x + 4.0f, p1.x - ImGui::GetFontSize() - 2.0f); // B at the end stays inside
+            dl->AddText({lx, p1.y - ImGui::GetFontSize() - 2.0f}, dial_brass, label);
         }
     }
-    const float h = (sy1 - sy0) * 0.45f;
-    dl->AddTriangleFilled({fill_x - h * 0.6f, sy0}, {fill_x + h * 0.6f, sy0}, {fill_x, sy0 + h}, text);
-
-    ImGui::Dummy(size);
-
-    if (gaps != nullptr)
+    if (fill_to > fill_from) // the percent only while something plays or loads
     {
-        const auto ms = [](double s) { return s * 1e3; };
-        ImGui::Text("Frame gap  min %.3f  max %.3f  mean %.3f  median %.3f ms", ms(gaps->min), ms(gaps->max),
-                    ms(gaps->mean), ms(gaps->median));
-        if (gaps->mean > 0.0)
-        {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f frames/s)", 1.0 / gaps->mean);
-        }
+        const std::string pct = std::format("{:.0f} %", fill_to * 100.0f);
+        const ImVec2 tw = ImGui::CalcTextSize(pct.c_str());
+        dl->AddText({p1.x - tw.x - ImGui::GetFontSize() * 1.2f, p0.y + ImGui::GetFontSize() * 0.3f}, text, pct.c_str());
     }
+    ImGui::Spacing();
 }

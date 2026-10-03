@@ -43,20 +43,20 @@ constexpr std::array<CommandInfo, static_cast<std::size_t>(Command::Count)> comm
     {"Setup...", ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_S},
     {"Reload Interfaces"},
     {"Clear", ImGuiKey_Escape},
-    {"Save Trace to file..."},
-    {"Export full trace"},
-    {"Import full trace"},
+    {"Save Trace to File..."},
+    {"Export Full Trace..."},
+    {"Import Full Trace..."},
     {"Tab", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_T},
     {"Graph View", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_G},
     {"Graph View##widget"},
-    {"Replay View"},
+    {"Replay"},
     {"LIN Control"},
     {"Instrument Panel"},
     {"DBC Editor"},
     {"Standalone Graph", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_B},
-    {"Gateway"},
     {"Conditional Logging..."},
     {"Find Signal...", ImGuiMod_Ctrl | ImGuiKey_P},
+    {"Convert..."},
     {"About"},
 }};
 
@@ -74,15 +74,6 @@ bool enabled(const App& app, Command cmd)
         return !app.measuring;
     case Command::MeasurementStop:
         return app.measuring;
-    case Command::Gateway: // two CAN interfaces in the setup
-    {
-        int can = 0;
-        for (const SetupNetwork& net : app.setup.networks)
-        {
-            can += static_cast<int>(std::ranges::count(net.interfaces, BusType::CAN, &SetupInterface::bus_type));
-        }
-        return can >= 2;
-    }
     default:
         return true;
     }
@@ -122,7 +113,11 @@ void menu_item(App& app, Command cmd)
 void poll_shortcuts(App& app)
 {
     // Esc (Trace Clear) must not fire while it closes a popup or menu.
-    const bool popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    // Escape is also "close this": a popup, the help overlay or a text field take it first, and a
+    // loaded file (file view) is never dropped by it, only by the Clear button (an Esc meant for the
+    // copy menu cleared an 8 GB view in a GUI test).
+    const bool popup_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || help_overlay_is_open()
+                            || ImGui::GetIO().WantTextInput || !app.trace.file.empty();
     if (app.menu.capturing_shortcut)
     {
         return; // the key being recorded must not run a command
@@ -179,6 +174,8 @@ void draw_menu_bar(App& app)
         menu_item(app, Command::WorkspaceSave);
         menu_item(app, Command::WorkspaceSaveAs);
         ImGui::Separator();
+        menu_item(app, Command::Convert);
+        ImGui::Separator();
         menu_item(app, Command::Settings);
         ImGui::Separator();
         menu_item(app, Command::Exit);
@@ -218,20 +215,24 @@ void draw_menu_bar(App& app)
             for (auto cmd = Command::NewTraceView; cmd <= Command::NewDbcEditor;
                  cmd = static_cast<Command>(static_cast<int>(cmd) + 1))
             {
-                if (cmd != Command::NewGraphWidget) // same window as Graph View; listing both showed it twice
+                // Graph View##widget is the same window as Graph View; Replay and DBC Editor sit one level up
+                if (cmd != Command::NewGraphWidget && cmd != Command::NewReplayView && cmd != Command::NewDbcEditor)
                 {
                     menu_item(app, cmd);
                 }
             }
             ImGui::EndMenu();
         }
+        menu_item(app, Command::NewReplayView);
+        menu_item(app, Command::NewDbcEditor);
+        ImGui::Separator();
         menu_item(app, Command::StandaloneGraph);
         menu_item(app, Command::FindSignal);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help"))
     {
-        if (ImGui::MenuItem("Keyboard shortcuts", "?"))
+        if (ImGui::MenuItem("Keyboard Shortcuts", "?"))
         {
             help_overlay_open();
         }
@@ -244,7 +245,7 @@ void draw_menu_bar(App& app)
 
 // Start/Stop: theme colours (ThemeButton) with the theme's rounding; disabled they fall back to
 // the theme's normal disabled button.
-void pill_button(App& app, const char* label, Command cmd, const ThemeButton& c, float border, float px)
+void pill_button(App& app, const char* label, Icon icon, Command cmd, const ThemeButton& c, float border, float px)
 {
     const bool on = enabled(app, cmd);
     if (on)
@@ -254,7 +255,7 @@ void pill_button(App& app, const char* label, Command cmd, const ThemeButton& c,
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(15.0f * px, ImGui::GetStyle().FramePadding.y));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, on ? border : ImGui::GetStyle().FrameBorderSize);
     ImGui::BeginDisabled(!on);
-    if (ImGui::Button(label))
+    if (icon_text_button(label, icon))
     {
         run(app, cmd);
     }
@@ -334,6 +335,12 @@ void draw_record_status(const App& app)
 constexpr const char* kraken_label = "Release the Kraken";
 
 // same_line_or_wrap() with a wider gap, for the start of a button group.
+// A pill's width: icon_text_button with the pill's 15 px side padding.
+float pill_width(const char* label, float px)
+{
+    return icon_text_button_width(label) - ImGui::GetStyle().FramePadding.x * 2.0f + 30.0f * px;
+}
+
 void group_gap(float next_width, float gap)
 {
     ImGui::SameLine(0.0f, gap);
@@ -369,23 +376,23 @@ void draw_control_bar(App& app)
         command_button(app, Command::WorkspaceOpen, Icon::DocumentOpen, "Open");
         same_line_or_wrap(command_button_width("Save"));
         command_button(app, Command::WorkspaceSave, Icon::DocumentSave, "Save");
-        group_gap(ImGui::CalcTextSize(kraken_label).x + 30.0f * px, group);
+        group_gap(pill_width(kraken_label, px), group);
         if (ImGui::GetCursorPosY() == row_y + dy)
         {
             ImGui::SetCursorPosY(row_y); // the pill stayed on the first row
         }
         // Measurement Start/Stop: taller than every other button (frame padding 9 px instead of 5 px).
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 9.0f * px));
-        pill_button(app, kraken_label, Command::MeasurementStart, theme_kraken_button(), 2.0f * px, px);
+        pill_button(app, kraken_label, Icon::PlaybackStart, Command::MeasurementStart, theme_kraken_button(), 2.0f * px, px);
         ImGui::PopStyleVar();
         command_tooltip(Command::MeasurementStart);
         const float pill_y = ImGui::GetItemRectMin().y - ImGui::GetWindowPos().y + ImGui::GetScrollY();
-        same_line_or_wrap(ImGui::CalcTextSize("Stop").x + 30.0f * px); // pill padding is 15 px
+        same_line_or_wrap(pill_width("Stop", px));
         if (ImGui::GetCursorPosY() == pill_y)
         {
             ImGui::SetCursorPosY(pill_y + dy); // the rest of the row follows Stop's y through SameLine
         }
-        pill_button(app, "Stop", Command::MeasurementStop, theme_stop_button(), 1.5f * px, px);
+        pill_button(app, "Stop", Icon::PlaybackStop, Command::MeasurementStop, theme_stop_button(), 1.5f * px, px);
         command_tooltip(Command::MeasurementStop);
 
         const char* setup = "Setup Interface...";
@@ -393,14 +400,12 @@ void draw_control_bar(App& app)
         command_button(app, Command::Setup, Icon::PreferencesSystem, setup);
         same_line_or_wrap(command_button_width("Record") + ImGui::GetFrameHeight());
         draw_record_button(app);
-        same_line_or_wrap(button_width("Gateway"));
-        ImGui::BeginDisabled(!enabled(app, Command::Gateway));
-        if (ImGui::Button("Gateway"))
-        {
-            run(app, Command::Gateway);
-        }
-        ImGui::EndDisabled();
-        command_tooltip(Command::Gateway);
+        group_gap(command_button_width("Replay"), group);
+        command_button(app, Command::NewReplayView, Icon::Replay, "Replay");
+        same_line_or_wrap(command_button_width("DBC Editor"));
+        command_button(app, Command::NewDbcEditor, Icon::Database, "DBC Editor");
+        same_line_or_wrap(command_button_width("Convert"));
+        command_button(app, Command::Convert, Icon::Convert, "Convert");
         draw_record_status(app);
 
         // Sea level: a faint teal swell along the bottom edge.

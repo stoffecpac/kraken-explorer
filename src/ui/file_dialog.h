@@ -35,7 +35,8 @@ struct FileFilter
 
 // Trace files the replay parsers read (also Trace > Import full trace).
 inline const std::vector<FileFilter> trace_read_filters = {
-    {"All Supported", "*.asc *.candump *.log *.pcap *.pcapng *.trc"}, {"Vector ASC", "*.asc"},
+    {"All Supported", "*.asc *.blf *.candump *.log *.mf4 *.mdf *.pcap *.pcapng *.trc"}, {"Vector ASC", "*.asc"},
+    {"Vector BLF", "*.blf"},                {"ASAM MDF4", "*.mf4 *.mdf"},
     {"Linux candump", "*.candump *.log"},   {"PCAP", "*.pcap"},          {"PCAPng", "*.pcapng"},
     {"PEAK PCAN trace", "*.trc"},           {"All Files", "*"}};
 

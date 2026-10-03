@@ -490,7 +490,8 @@ void draw_can_status(App& app, CanStatusState& s, const WorkspaceTab& tab)
     }
     s.was_measuring = app.measuring;
     // Error frames: only the trace rows appended since the last call.
-    for (uint64_t i = std::max(s.trace_done, app.trace.begin); i < app.trace.end; ++i)
+    // A file view (Replay load) is not live: its error frames are not this measurement's.
+    for (uint64_t i = app.trace.file.empty() ? std::max(s.trace_done, app.trace.begin) : app.trace.end; i < app.trace.end; ++i)
     {
         const BusMessage& m = trace_at(app.trace, i);
         if (m.errors != 0 && m.iface < s.rows.size())

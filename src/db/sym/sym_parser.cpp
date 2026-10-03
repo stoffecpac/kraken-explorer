@@ -12,6 +12,7 @@
 
 #include "core/log.h"
 #include "core/text.h"
+#include "db/dbf/dbf.h"
 #include "db/dbc/dbc_parser.h"
 
 namespace
@@ -385,5 +386,16 @@ bool sym_parse_file(const std::filesystem::path& path, CanDb& db)
 
 bool can_db_parse_file(const std::filesystem::path& path, CanDb& db)
 {
-    return iequals(path.extension().string(), ".sym") ? sym_parse_file(path, db) : dbc_parse_file(path, db);
+    const std::string ext = path.extension().string();
+    if (iequals(ext, ".dbf"))
+    {
+        std::string error;
+        if (!dbf_parse_file(path, db, &error))
+        {
+            log_error(std::format("{}: {}", path.string(), error));
+            return false;
+        }
+        return true;
+    }
+    return iequals(ext, ".sym") ? sym_parse_file(path, db) : dbc_parse_file(path, db);
 }
